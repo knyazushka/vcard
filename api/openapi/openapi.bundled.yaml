@@ -1,0 +1,2475 @@
+openapi: 3.0.3
+info:
+  title: vcard API
+  version: 0.1.0
+  description: |
+    Виртуальная визитка сотрудника.
+
+    Модель тенантная: компания — единица изоляции, глобального администратора
+    нет. Попасть в компанию можно только по приглашению её админа; создать
+    компанию может любой зарегистрированный пользователь и становится её
+    администратором.
+
+    Публичная часть (`/public/**`) отдаётся без аутентификации и использует
+    отдельные схемы: приватные поля в неё не попадают по построению, а не
+    за счёт зануления.
+
+    Спека — источник истины: сервер генерируется ogen, клиент фронта —
+    openapi-typescript. Рассинхрон ловится компилятором, а не тестировщиком.
+  license:
+    name: MIT
+    url: https://github.com/knyazushka/vcard/blob/main/LICENSE
+servers:
+  - url: https://api.vcard.example/api/v1
+    description: production
+  - url: http://localhost:8080/api/v1
+    description: local
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+    description: Регистрация, вход, ротация токенов.
+  - name: companies
+    description: Компании-тенанты и их справочники.
+  - name: invitations
+    description: Приглашения в компанию.
+  - name: profiles
+    description: Профили сотрудников.
+  - name: public
+    description: |
+      Страница визитки и карточка — без аутентификации.
+      Пробы (`/healthz`, `/readyz`) и метрики Prometheus в спеке не описаны:
+      они живут вне версионированного префикса и относятся к инфраструктуре,
+      а не к контракту с фронтом.
+paths:
+  /public/employee/{slug}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      tags:
+        - public
+      operationId: getPublicProfile
+      summary: Визитка по адресу
+      description: |
+        Заблокированная страница отвечает 200 со `status: BLOCKED` и `profile: null`,
+        а не 404 — иначе Next покажет страницу ошибки вместо заглушки, и ссылка,
+        которую уже разослали, начнёт выглядеть битой. Слаг при этом остаётся занятым.
+
+        Неопубликованный (DRAFT) и архивный профиль дают 404: их вообще не должно
+        быть видно снаружи.
+      security: []
+      responses:
+        '200':
+          description: Опубликованная либо заблокированная страница.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPublic'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicProfileResponse'
+        '304':
+          description: Не изменилось с момента, указанного в `If-None-Match`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /public/employee/{slug}/card.png:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      tags:
+        - public
+      operationId: getProfileCardPng
+      summary: Карточка визитки, PNG
+      description: |
+        Готовый к скачиванию файл. PNG, а не JPEG: на карточке текст, логотип
+        и плоские заливки — JPEG даёт звон вокруг букв.
+
+        Генерируется синхронно при первом обращении и кладётся в хранилище
+        под именем `hash(данные профиля + версия рендерера)`. Поэтому правка
+        профиля меняет URL сама, а изменение макета в коде разом обесценивает
+        все старые файлы — ручная инвалидация не нужна.
+
+        Единственная CPU-тяжёлая операция в системе и при этом публичная,
+        поэтому лимит запросов здесь строже остальных.
+      security: []
+      parameters:
+        - name: download
+          in: query
+          required: false
+          description: 'С `true` ответ получает `Content-Disposition: attachment`.'
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Изображение карточки.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPublic'
+            Content-Disposition:
+              schema:
+                type: string
+              description: Присутствует только при `download=true`.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: Не изменилось с момента, указанного в `If-None-Match`.
+        '404':
+          description: |
+            Профиль не найден, не опубликован или заблокирован. Для заблокированного
+            именно 404, а не заглушка: картинка не должна расходиться по мессенджерам
+            после блокировки.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /public/employee/{slug}/card.svg:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      tags:
+        - public
+      operationId: getProfileCardSvg
+      summary: Карточка визитки, SVG
+      description: |
+        Тот же макет, из которого растеризуется PNG, — не второе представление,
+        а исходник первого. Нужен фронту для живого превью: Next встраивает SVG
+        прямо в DOM (не через `<img>`, иначе внешние шрифты и аватар не загрузятся),
+        и React не дублирует вёрстку карточки у себя.
+
+        Как файл для скачивания не годится и для этого не предназначен:
+        мессенджеры и почтовые клиенты SVG в превью не рендерят.
+      security: []
+      responses:
+        '200':
+          description: Макет карточки.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlPublic'
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+        '304':
+          description: Не изменилось с момента, указанного в `If-None-Match`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/register:
+    post:
+      tags:
+        - auth
+      operationId: register
+      summary: Регистрация
+      description: |
+        Свободная: членства пользователь при этом не получает и до вступления
+        в компанию не может ничего, кроме как создать свою или принять приглашение.
+
+        Регистрация по приглашению идёт другим путём — POST /invitations/{token}/accept,
+        где учётка, членство и черновик профиля создаются одной транзакцией.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Учётка создана, сессия открыта.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/RefreshCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Адрес уже занят.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/login:
+    post:
+      tags:
+        - auth
+      operationId: login
+      summary: Вход
+      description: |
+        Неверная пара логин/пароль и несуществующий адрес дают один и тот же
+        ответ 401 с кодом `unauthenticated` — иначе форма входа превращается
+        в перебиратель зарегистрированных адресов.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Сессия открыта.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/RefreshCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/refresh:
+    post:
+      tags:
+        - auth
+      operationId: refreshToken
+      summary: Обновить access-токен
+      description: |
+        Единственная операция, работающая по refresh-cookie, — тела запроса нет
+        и быть не должно: токен до JavaScript не доходит.
+
+        Refresh ротируется при каждом вызове. Предъявление уже израсходованного
+        токена трактуется как кража и гасит всю family сессий, а не только
+        предъявленный экземпляр: легитимный клиент израсходованный токен
+        предъявить не может, он его уже обменял.
+      security:
+        - refreshCookie: []
+      responses:
+        '200':
+          description: Выдан новый access; refresh-cookie заменена.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/RefreshCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessToken'
+        '401':
+          description: Cookie отсутствует, истекла, отозвана или предъявлена повторно.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/ClearRefreshCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/logout:
+    post:
+      tags:
+        - auth
+      operationId: logout
+      summary: Выход
+      description: |
+        Гасит текущую сессию и стирает cookie. Идемпотентна: повторный вызов
+        без действующей сессии всё равно отвечает 204, потому что «выйти»
+        и «уже вышел» для клиента — одно состояние.
+
+        Ранее выданный access-токен остаётся формально валидным до истечения
+        своих 15 минут. Это цена stateless-проверки подписи; если понадобится
+        мгновенный отзыв, добавится проверка `sid` по хранилищу сессий.
+      security:
+        - bearerAuth: []
+        - refreshCookie: []
+      responses:
+        '204':
+          description: Сессия закрыта.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/ClearRefreshCookie'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/logout-all:
+    post:
+      tags:
+        - auth
+      operationId: logoutAll
+      summary: Выйти на всех устройствах
+      description: Гасит все сессии пользователя. Нужна после смены пароля и как реакция на подозрение о краже.
+      responses:
+        '204':
+          description: Все сессии закрыты.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/ClearRefreshCookie'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /auth/me:
+    get:
+      tags:
+        - auth
+      operationId: getMe
+      summary: Текущий пользователь и его членства
+      description: |
+        Отдаёт список компаний с ролями — из него фронт строит переключатель
+        тенанта и понимает, какие разделы админки показывать.
+        Пустой `memberships` — нормальное состояние сразу после регистрации.
+      responses:
+        '200':
+          description: Пользователь и его членства.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies:
+    post:
+      tags:
+        - companies
+      operationId: createCompany
+      summary: Создать компанию
+      description: |
+        Доступна любому зарегистрированному пользователю: глобального
+        администратора в системе нет, тенант заводится self-service.
+        Создатель в той же транзакции получает членство с ролью ADMIN —
+        компания без администратора существовать не может ни мгновения.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCompanyRequest'
+      responses:
+        '201':
+          description: Компания создана, вызывающий стал её администратором.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+    get:
+      tags:
+        - companies
+      operationId: getCompany
+      summary: Карточка компании
+      description: Доступна любому участнику — сотруднику она нужна, чтобы показать реквизиты на своей странице.
+      responses:
+        '200':
+          description: Компания.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    patch:
+      tags:
+        - companies
+      operationId: updateCompany
+      summary: Изменить компанию
+      description: Роль ADMIN. Отсутствующее поле не меняется, явный null очищает.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCompanyRequest'
+      responses:
+        '200':
+          description: Обновлённая компания.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/logo:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+    put:
+      tags:
+        - companies
+      operationId: uploadCompanyLogo
+      summary: Загрузить логотип
+      description: |
+        Роль ADMIN. PNG, JPEG или WebP, не больше 2 МБ.
+
+        Логотипы прилетают любого размера и с альфой и без; изображение
+        приводится к фиксированной высоте сразу при загрузке, а не при каждом
+        рендере карточки. Тип определяется по сигнатуре файла: `Content-Type`
+        и расширение задаёт клиент, доверять им нельзя.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Компания с обновлённым логотипом.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    delete:
+      tags:
+        - companies
+      operationId: deleteCompanyLogo
+      summary: Удалить логотип
+      description: Роль ADMIN. Идемпотентна.
+      responses:
+        '204':
+          description: Логотипа больше нет.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/positions:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+    get:
+      tags:
+        - companies
+      operationId: listPositions
+      summary: Должности компании
+      description: |
+        Виден любому участнику — из этого списка сотрудник выбирает должность.
+        Справочник у каждого тенанта свой; при создании компании в него
+        копируется общий стартовый набор, иначе новый администратор
+        начинает с пустого экрана и бросает онбординг.
+      responses:
+        '200':
+          description: Должности.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Position'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    post:
+      tags:
+        - companies
+      operationId: createPosition
+      summary: Добавить должность
+      description: Роль ADMIN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PositionRequest'
+      responses:
+        '201':
+          description: Должность создана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Position'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/positions/{positionId}:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - name: positionId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+    patch:
+      tags:
+        - companies
+      operationId: updatePosition
+      summary: Переименовать должность
+      description: Роль ADMIN. Название меняется сразу во всех профилях, которые на неё ссылаются.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PositionRequest'
+      responses:
+        '200':
+          description: Должность обновлена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Position'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    delete:
+      tags:
+        - companies
+      operationId: deletePosition
+      summary: Удалить должность
+      description: |
+        Роль ADMIN. Профили, ссылавшиеся на неё, сохраняют название как
+        введённое вручную: молча обнулять должность живого сотрудника нельзя,
+        он об этом не узнает и увидит пустое место на своей визитке.
+      responses:
+        '204':
+          description: Должность удалена.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/tags:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+    get:
+      tags:
+        - companies
+      operationId: listTags
+      summary: Теги компании
+      description: Виден любому участнику — из этого списка сотрудник набирает свои три тега.
+      responses:
+        '200':
+          description: Теги.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tag'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    post:
+      tags:
+        - companies
+      operationId: createTag
+      summary: Добавить тег
+      description: |
+        Роль ADMIN. Название нормализуется перед проверкой уникальности —
+        без этого справочник зарастает вариантами одного и того же слова
+        в разном регистре.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagRequest'
+      responses:
+        '201':
+          description: Тег создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Тег с таким нормализованным названием уже есть.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/tags/{tagId}:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - name: tagId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+    delete:
+      tags:
+        - companies
+      operationId: deleteTag
+      summary: Удалить тег
+      description: |
+        Роль ADMIN. Как и с должностью, у профилей тег остаётся —
+        превращается в пользовательский.
+      responses:
+        '204':
+          description: Тег удалён.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/employees:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Offset'
+    get:
+      tags:
+        - companies
+      operationId: listEmployees
+      summary: Сотрудники компании
+      description: Роль ADMIN. Содержит адреса почты, поэтому рядовому участнику недоступен.
+      responses:
+        '200':
+          description: Сотрудники.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/employees/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+    patch:
+      tags:
+        - companies
+      operationId: updateEmployeeRole
+      summary: Изменить роль сотрудника
+      description: |
+        Роль ADMIN. Понижение последнего администратора отклоняется
+        с кодом `last_admin` — иначе компания остаётся без управления
+        и чинится только руками в базе.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEmployeeRequest'
+      responses:
+        '200':
+          description: Роль изменена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    delete:
+      tags:
+        - companies
+      operationId: removeEmployee
+      summary: Исключить сотрудника
+      description: |
+        Роль ADMIN. Членство удаляется, профиль переходит в ARCHIVED,
+        его страница перестаёт открываться — но слаг остаётся занятым,
+        как и при блокировке. Исключение последнего администратора
+        отклоняется с `last_admin`.
+      responses:
+        '204':
+          description: Сотрудник исключён.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/invitations:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+    post:
+      tags:
+        - invitations
+      operationId: createInvitation
+      summary: Пригласить сотрудника
+      description: |
+        Роль ADMIN. Приглашение и письмо создаются одной транзакцией:
+        письмо кладётся в outbox, отдельный воркер разгребает очередь
+        с ретраями. Синхронная отправка означала бы, что недоступность
+        почтового провайдера роняет создание приглашения.
+
+        Токен — 32 байта из crypto/rand; в базе хранится только его sha256,
+        сам токен существует лишь в письме. Утечка дампа не даёт вступить
+        ни в одну компанию.
+
+        Повторное приглашение на адрес, у которого уже есть действующее,
+        отклоняется с `409` — на это стоит частичный уникальный индекс.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvitationRequest'
+      responses:
+        '201':
+          description: Приглашение создано, письмо поставлено в очередь.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: На этот адрес уже есть действующее приглашение либо он уже состоит в компании.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            Превышен суточный лимит приглашений. Ограничение обязательное:
+            без него администратор рассылает письма с вашего домена на чужие
+            адреса, и домен уезжает в спам-листы.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    get:
+      tags:
+        - invitations
+      operationId: listInvitations
+      summary: Приглашения компании
+      description: |
+        Роль ADMIN. Токен не отдаётся ни в каком виде — в базе его и нет,
+        только хэш.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/InvitationStatus'
+      responses:
+        '200':
+          description: Приглашения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/invitations/{invitationId}:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - name: invitationId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+    delete:
+      tags:
+        - invitations
+      operationId: revokeInvitation
+      summary: Отозвать приглашение
+      description: |
+        Роль ADMIN. Строка не удаляется, а переводится в REVOKED: история
+        «кого звали и кто отозвал» переживает отзыв. Ссылка из письма
+        перестаёт работать немедленно.
+      responses:
+        '204':
+          description: Приглашение отозвано.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Приглашение уже принято — отзывать нечего, исключать нужно сотрудника.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /companies/{companyId}/invitations/{invitationId}/resend:
+    parameters:
+      - $ref: '#/components/parameters/CompanyId'
+      - name: invitationId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+    post:
+      tags:
+        - invitations
+      operationId: resendInvitation
+      summary: Отправить приглашение повторно
+      description: |
+        Роль ADMIN. Всегда выпускает НОВЫЙ токен, а старый инвалидирует:
+        исходный в базе не хранится, повторить прежнее письмо технически
+        невозможно. Срок жизни отсчитывается заново.
+      responses:
+        '200':
+          description: Новое письмо поставлено в очередь.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Приглашение уже принято или отозвано.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /invitations/{token}:
+    parameters:
+      - $ref: '#/components/parameters/Token'
+    get:
+      tags:
+        - invitations
+      operationId: getInvitationPreview
+      summary: Что за приглашение
+      description: |
+        Нужен, чтобы Next отрендерил на SSR страницу «Вас пригласили в Acme»
+        вместо пустого спиннера, и чтобы фронт знал, показывать форму пароля
+        или кнопку входа.
+
+        Токен передаётся в пути и потому попадает в журналы доступа
+        и в заголовок `Referer`. Оба маршрута приёма исключены из логирования
+        пути, а страница приглашения отдаётся с `Referrer-Policy: no-referrer`.
+      security: []
+      responses:
+        '200':
+          description: Действующее приглашение.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationPreview'
+        '404':
+          description: Токен неизвестен, отозван, уже использован или истёк.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /invitations/{token}/accept:
+    parameters:
+      - $ref: '#/components/parameters/Token'
+    post:
+      tags:
+        - invitations
+      operationId: acceptInvitation
+      summary: Принять приглашение
+      description: |
+        Аутентификация необязательна, и от неё зависит ветка:
+
+        * **учётки с этим адресом нет** — токена достаточно, в теле нужен
+          пароль. Пользователь, членство и черновик профиля создаются одной
+          транзакцией, почта сразу считается подтверждённой: письмо уже дошло.
+        * **учётка есть** — требуется действующий access-токен, пароль игнорируется.
+        * **вошли под другим пользователем** — `403` с `email_mismatch`,
+          а не молчаливое принятие: письма пересылают, и токена самого по себе
+          для вступления недостаточно.
+        * **уже состоит в компании** — `200`, приглашение просто закрывается,
+          членство не дублируется.
+      security:
+        - {}
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationRequest'
+      responses:
+        '200':
+          description: |
+            Приглашение принято. `accessToken` присутствует только в ветке
+            регистрации — вместе с ним ставится refresh-cookie.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: Только в ветке регистрации; формат — как у POST /auth/login.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptInvitationResponse'
+        '400':
+          description: Нужен пароль (новая учётка), а он не передан либо не удовлетворяет требованиям.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Учётка с этим адресом уже есть — требуется вход.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Вход выполнен под другим адресом (`email_mismatch`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Токен неизвестен, отозван, уже использован или истёк.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    get:
+      tags:
+        - profiles
+      operationId: getProfile
+      summary: Профиль целиком
+      responses:
+        '200':
+          description: Профиль.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    patch:
+      tags:
+        - profiles
+      operationId: updateProfile
+      summary: Изменить профиль
+      description: |
+        Владелец либо ADMIN компании — второе прямо требует ТЗ
+        («администратор может редактировать странички пользователей»).
+
+        Правила, которых нет в схеме и которые проверяются здесь:
+        должность задаётся либо ссылкой на справочник, либо своим текстом,
+        но не одновременно; тегов суммарно не больше трёх; пользовательский
+        тег нормализуется, чтобы не плодить дубли в разном регистре.
+
+        `aboutHtml` принимается сырым из редактора и санитизируется
+        на записи по allowlist — в ответе уже очищенный вариант. Именно
+        на записи, а не на чтении: иначе обновление санитайзера молча
+        меняет то, как выглядят давно сохранённые страницы.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Обновлённый профиль.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: |
+            Нарушено доменное правило — должность задана двумя способами сразу,
+            тегов больше трёх, тег из чужой компании.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}/avatar:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    put:
+      tags:
+        - profiles
+      operationId: uploadAvatar
+      summary: Загрузить фотографию
+      description: |
+        PNG, JPEG или WebP, не больше 5 МБ. Тип проверяется по сигнатуре файла.
+
+        Кроп передаётся отдельными полями и сохраняется метаданными —
+        в файл он не выжигается. Исходник остаётся целым, и кроп можно
+        переиграть, не заставляя человека загружать фотографию заново.
+        Круг рисуется маской при рендере: в самой картинке его нет,
+        иначе PNG-карточка на непрозрачном фоне получила бы чёрные углы.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                cropX:
+                  type: integer
+                  minimum: 0
+                cropY:
+                  type: integer
+                  minimum: 0
+                cropSize:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Фотография загружена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avatar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/Unexpected'
+    delete:
+      tags:
+        - profiles
+      operationId: deleteAvatar
+      summary: Удалить фотографию
+      description: Идемпотентна.
+      responses:
+        '204':
+          description: Фотографии больше нет.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}/avatar/crop:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    put:
+      tags:
+        - profiles
+      operationId: updateAvatarCrop
+      summary: Изменить область кадрирования
+      description: Меняет только метаданные — файл не перезаливается.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Crop'
+      responses:
+        '200':
+          description: Кроп обновлён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avatar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Область выходит за границы изображения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}/slug:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    put:
+      tags:
+        - profiles
+      operationId: updateProfileSlug
+      summary: Сменить адрес визитки
+      description: |
+        Пункт ТЗ: адрес выдаётся автоматически из части почты до `@`,
+        но его можно поменять на любой свободный.
+
+        Занятость проверяется вставкой с обработкой конфликта, а не
+        предварительным SELECT: между проверкой и записью успевает
+        вклиниться другой запрос, и «свободный» адрес оказывается занят.
+
+        Прежний адрес освобождается и может быть занят кем угодно —
+        в отличие от блокировки, где слаг удерживается.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSlugRequest'
+      responses:
+        '200':
+          description: Адрес изменён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Адрес занят (`slug_taken`) или зарезервирован (`slug_reserved`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}/status:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    put:
+      tags:
+        - profiles
+      operationId: updateProfileStatus
+      summary: Опубликовать или заблокировать
+      description: |
+        Две разные операции под одним ресурсом, и роли у них разные:
+
+        * `PUBLISHED` от владельца — публикация. Требует заполненного имени
+          и ровно трёх тегов; черновик с двумя тегами опубликовать нельзя.
+        * `BLOCKED` и снятие блокировки — только ADMIN компании. По ТЗ
+          заблокированная страница показывает заглушку, а адрес остаётся
+          занятым: снять его и отдать другому нельзя.
+
+        Владелец разблокировать себя не может — иначе блокировка
+        не была бы блокировкой.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileStatusRequest'
+      responses:
+        '200':
+          description: Статус изменён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Профиль не готов к публикации — нет имени или тегов меньше трёх.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /profiles/{profileId}/card.png:
+    parameters:
+      - $ref: '#/components/parameters/ProfileId'
+    get:
+      tags:
+        - profiles
+      operationId: getOwnProfileCard
+      summary: Карточка своего профиля, PNG
+      description: |
+        То же изображение, что и на публичном маршруте, но работает
+        и для черновика: человек должен увидеть, что скачает, до того
+        как опубликует страницу.
+
+        Публичный `/public/employee/{slug}/card.png` для DRAFT отдаёт 404,
+        поэтому предпросмотр без этого маршрута был бы невозможен.
+      responses:
+        '200':
+          description: Изображение карточки.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+  /slugs/{slug}/availability:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      tags:
+        - profiles
+      operationId: checkSlugAvailability
+      summary: Свободен ли адрес
+      description: |
+        Подсказка для формы. Требует аутентификации и ограничена по частоте:
+        анонимный доступ превратил бы её в перебиратель занятых адресов,
+        то есть в список всех визиток системы.
+
+        Ответ носит рекомендательный характер — окончательное решение
+        принимает PUT, потому что между проверкой и сохранением адрес
+        может занять кто-то другой.
+      responses:
+        '200':
+          description: Результат проверки.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlugAvailability'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/Unexpected'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access-токен, время жизни 15 минут. Содержит только `sub` (id пользователя)
+        и `sid` (id сессии) — роль и компания в токен НЕ кладутся и резолвятся
+        на каждом запросе, иначе отзыв прав вступал бы в силу с задержкой.
+
+        Тенант определяется самим ресурсом: `companyId` стоит в пути
+        у всех операций компании, профиль знает свою компанию сам.
+        Отдельного заголовка активного тенанта нет — он был бы вторым
+        источником истины и рано или поздно разошёлся бы с путём.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: vcard_refresh
+      description: |
+        Refresh-токен: httpOnly, Secure, SameSite=Lax, opaque-строка (не JWT).
+        Ротируется при каждом использовании, повторное предъявление уже
+        израсходованного токена гасит всю family сессий.
+        Используется единственной операцией — POST /auth/refresh.
+  schemas:
+    SlugLookup:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$
+      description: |
+        Адрес визитки, каким он пришёл из URL.
+
+        Регистр здесь допускается, хотя выдаём мы всегда нижний: ссылку
+        набирают с визитки руками, копируют из письма, где клиент мог
+        поменять регистр. Слаг в базе — citext, поиск и так регистронезависим,
+        и отвечать на `/employee/Laura` ошибкой валидации было бы
+        беспричинной грубостью.
+
+        Строгое правило (только нижний регистр) остаётся у `Slug` — оно
+        применяется там, где адрес ЗАДАЁТСЯ, а не разбирается.
+      example: Laura-Hoffmann
+    FieldError:
+      type: object
+      required:
+        - field
+        - code
+      properties:
+        field:
+          type: string
+          description: Путь в теле запроса в точечной нотации.
+          example: customTags.1
+        code:
+          type: string
+          example: too_long
+        message:
+          type: string
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: |
+            Машиночитаемый код для ветвления на клиенте. Намеренно НЕ enum:
+            закрытый список сделал бы добавление нового кода ломающим изменением
+            для уже выкаченных клиентов. Известные значения:
+
+            * `validation_failed`   — см. `fields`
+            * `unauthenticated`     — токен отсутствует, истёк или отозван
+            * `forbidden`           — роли в этой компании недостаточно
+            * `not_found`
+            * `slug_taken`          — адрес визитки занят (в т.ч. заблокированным профилем)
+            * `slug_reserved`       — адрес в списке зарезервированных
+            * `email_mismatch`      — приглашение выписано на другой адрес
+            * `invitation_expired`
+            * `invitation_used`
+            * `already_member`
+            * `last_admin`          — нельзя разжаловать или удалить последнего админа
+            * `rate_limited`
+          example: slug_taken
+        message:
+          type: string
+          description: Человекочитаемое пояснение. Для пользователя не предназначено — текст локализует фронт по `code`.
+          example: slug "laura-hoffmann" is already taken
+        fields:
+          type: array
+          description: Заполняется только при `validation_failed`.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        requestId:
+          type: string
+          description: Совпадает с заголовком `X-Request-Id`; по нему находится запрос в логах.
+    Slug:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+      description: |
+        Адрес визитки: domain.com/employee/{slug}. Пространство имён глобальное
+        (в URL нет компании), поэтому уникальность — по всей системе.
+        Блокировка страницы слаг НЕ освобождает.
+      example: laura-hoffmann
+    URLNullable:
+      type: string
+      format: uri
+      maxLength: 2048
+      nullable: true
+    PublicLinks:
+      type: object
+      description: Готовые ссылки — фронт не должен знать правила их сборки.
+      properties:
+        phone:
+          type: string
+          nullable: true
+        whatsapp:
+          type: string
+          format: uri
+          nullable: true
+          example: https://wa.me/491752607358
+        telegram:
+          type: string
+          format: uri
+          nullable: true
+          example: https://t.me/laura
+    Phone:
+      type: object
+      required:
+        - value
+      properties:
+        value:
+          type: string
+          maxLength: 32
+          description: Хранится в E.164 после нормализации; на вход принимается в любом виде.
+          example: '+491752607358'
+        label:
+          type: string
+          maxLength: 40
+          nullable: true
+          example: Офис
+    CompanyPublic:
+      type: object
+      required:
+        - name
+      description: |
+        Проекция компании для публичной визитки. Отдельный тип, а не Company
+        с omitempty: при добавлении поля в Company оно не утечёт сюда само.
+        Адрес и телефоны приходят, только если сотрудник включил их показ.
+      properties:
+        name:
+          type: string
+        logoUrl:
+          $ref: '#/components/schemas/URLNullable'
+        address:
+          type: string
+          nullable: true
+        phones:
+          type: array
+          items:
+            $ref: '#/components/schemas/Phone'
+    ProfilePublic:
+      type: object
+      required:
+        - slug
+        - tags
+      description: |
+        Проекция для страницы визитки. Отдельный тип — здесь нет ни email
+        владельца, ни его роли, ни id. Переиспользовать Profile с занулением
+        полей нельзя: следующее добавленное поле утечёт само.
+      properties:
+        slug:
+          $ref: '#/components/schemas/Slug'
+        fullName:
+          type: string
+          nullable: true
+        avatarUrl:
+          $ref: '#/components/schemas/URLNullable'
+        positionTitle:
+          type: string
+          nullable: true
+        aboutHtml:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+        links:
+          $ref: '#/components/schemas/PublicLinks'
+        company:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/CompanyPublic'
+        cardImageUrl:
+          $ref: '#/components/schemas/URLNullable'
+    PublicProfileResponse:
+      type: object
+      required:
+        - status
+      description: |
+        Заблокированная страница отвечает 200 с status = BLOCKED и profile = null,
+        а не 404: так Next отрисует человеческую заглушку с корректными
+        OG-тегами вместо страницы ошибки. Слаг при этом остаётся занятым.
+      properties:
+        status:
+          type: string
+          enum:
+            - PUBLISHED
+            - BLOCKED
+        profile:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ProfilePublic'
+    Email:
+      type: string
+      format: email
+      minLength: 6
+      maxLength: 254
+      pattern: ^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,63}$
+      description: |
+        Регистр не значим, сравнение и уникальность — по нормализованному
+        значению (в БД `citext`).
+
+        Паттерн намеренно строже RFC 5322: требует TLD и не пропускает
+        `a@-b.com`, `a@b..com`, точку в конце домена. Взамен отсекает
+        экзотику, которая в реальной почте не встречается, — адреса
+        с кавычками в локальной части, IP-литералы (`a@[192.168.0.1]`)
+        и не-ASCII домены. Для приглашений это верный размен: адрес,
+        на который нельзя доставить письмо, бесполезен.
+      example: laura.hoffmann@acme.com
+    Password:
+      type: string
+      format: password
+      minLength: 8
+      maxLength: 128
+      description: |
+        Верхняя граница — защита от DoS на функции хеширования: без неё
+        мегабайтный «пароль» отнимает секунды CPU на каждой попытке входа.
+
+        Хешировать argon2id, не bcrypt: bcrypt молча обрезает вход на 72 байтах,
+        и при maxLength 128 часть пароля просто не участвовала бы в проверке.
+    RegisterRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        password:
+          $ref: '#/components/schemas/Password'
+      description: |
+        Свободная регистрация. Пользователь без членства не может ничего,
+        кроме как создать компанию или принять приглашение — это и есть
+        единственные два входа в тенант.
+    AccessToken:
+      type: object
+      required:
+        - accessToken
+        - tokenType
+        - expiresIn
+      properties:
+        accessToken:
+          type: string
+          description: |
+            Хранить в памяти JS. НЕ в localStorage: там XSS крадёт не 15 минут,
+            а постоянный доступ. Refresh уходит отдельно, в httpOnly cookie,
+            и до JavaScript не доходит вовсе.
+        tokenType:
+          type: string
+          enum:
+            - Bearer
+        expiresIn:
+          type: integer
+          format: int32
+          description: Секунд до истечения access-токена.
+          example: 900
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        password:
+          type: string
+          format: password
+    UUID:
+      type: string
+      format: uuid
+      example: 018f3a2c-9c4e-7b3a-8f21-6d5b0c1a2e34
+    Timestamp:
+      type: string
+      format: date-time
+      example: '2026-08-16T09:41:00Z'
+    User:
+      type: object
+      required:
+        - id
+        - email
+        - createdAt
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        email:
+          $ref: '#/components/schemas/Email'
+        emailVerified:
+          type: boolean
+          description: |
+            Регистрация по приглашению сразу даёт true — письмо уже дошло,
+            второе подтверждение было бы ритуалом.
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    Role:
+      type: string
+      enum:
+        - ADMIN
+        - EMPLOYEE
+      description: |
+        Роль — свойство связки пользователь↔компания, а не пользователя.
+        Один человек может быть админом в одной компании и сотрудником в другой.
+        EMPLOYEE — та самая «минимальная роль» из ТЗ, с которой доступна
+        генерация карточки.
+    Membership:
+      type: object
+      required:
+        - companyId
+        - companyName
+        - role
+      properties:
+        companyId:
+          $ref: '#/components/schemas/UUID'
+        companyName:
+          type: string
+        companyLogoUrl:
+          $ref: '#/components/schemas/URLNullable'
+        role:
+          $ref: '#/components/schemas/Role'
+        profileId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Черновик профиля создаётся вместе с членством, поэтому null здесь — аномалия, а не норма.
+    Me:
+      type: object
+      required:
+        - user
+        - memberships
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+          description: 'Пустой массив — валидное состояние: зарегистрировался, но ещё никуда не вступил.'
+    CreateCompanyRequest:
+      type: object
+      required:
+        - name
+      description: |
+        Создатель компании автоматически становится её ADMIN — глобального
+        администратора в системе нет, тенант заводится self-service.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        address:
+          type: string
+          maxLength: 500
+        phones:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Phone'
+    Company:
+      type: object
+      required:
+        - id
+        - name
+        - createdAt
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        logoUrl:
+          $ref: '#/components/schemas/URLNullable'
+        address:
+          type: string
+          maxLength: 500
+          nullable: true
+        phones:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Phone'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    UpdateCompanyRequest:
+      type: object
+      description: PATCH-семантика — отсутствующее поле не меняется, явный null очищает.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        address:
+          type: string
+          maxLength: 500
+          nullable: true
+        phones:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Phone'
+    Position:
+      type: object
+      required:
+        - id
+        - title
+      description: Должность из справочника компании. Справочники у каждого тенанта свои.
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        usageCount:
+          type: integer
+          format: int32
+          description: Сколько профилей ссылается — чтобы админ видел, что удаление не пройдёт даром.
+    PositionRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+    Tag:
+      type: object
+      required:
+        - id
+        - title
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 75
+        usageCount:
+          type: integer
+          format: int32
+    TagRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 75
+          description: |
+            Нормализуется перед проверкой уникальности (trim, схлопывание пробелов,
+            сравнение без учёта регистра) — иначе справочник зарастает
+            «Golang» / «golang» / «GoLang».
+    UUIDNullable:
+      type: string
+      format: uuid
+      nullable: true
+    SlugNullable:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+      nullable: true
+    ProfileStatus:
+      type: string
+      enum:
+        - DRAFT
+        - PUBLISHED
+        - BLOCKED
+        - ARCHIVED
+      description: |
+        DRAFT     — создан вместе с членством, ещё не опубликован.
+        PUBLISHED — виден по ссылке.
+        BLOCKED   — заблокирован админом: отдаётся заглушка, но слаг остаётся занятым.
+        ARCHIVED  — сотрудник исключён из компании; слаг тоже удерживается.
+        Слаг не освобождается ни в одном из состояний — это требование ТЗ,
+        поэтому уникальный индекс по нему безусловный, без partial-условия.
+    Employee:
+      type: object
+      required:
+        - userId
+        - email
+        - role
+        - joinedAt
+      description: Строка списка сотрудников в админке.
+      properties:
+        userId:
+          $ref: '#/components/schemas/UUID'
+        email:
+          $ref: '#/components/schemas/Email'
+        role:
+          $ref: '#/components/schemas/Role'
+        fullName:
+          type: string
+          nullable: true
+        profileId:
+          $ref: '#/components/schemas/UUIDNullable'
+        profileSlug:
+          $ref: '#/components/schemas/SlugNullable'
+        profileStatus:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ProfileStatus'
+        joinedAt:
+          $ref: '#/components/schemas/Timestamp'
+    PageInfo:
+      type: object
+      required:
+        - total
+        - limit
+        - offset
+      properties:
+        total:
+          type: integer
+          format: int64
+        limit:
+          type: integer
+          format: int32
+        offset:
+          type: integer
+          format: int32
+    EmployeeList:
+      type: object
+      required:
+        - items
+        - page
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Employee'
+        page:
+          $ref: '#/components/schemas/PageInfo'
+    UpdateEmployeeRequest:
+      type: object
+      required:
+        - role
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+      description: |
+        Понижение последнего ADMIN отклоняется с `last_admin`: иначе компания
+        остаётся без управления и чинится только руками в SQL.
+    InvitationStatus:
+      type: string
+      enum:
+        - PENDING
+        - ACCEPTED
+        - REVOKED
+        - EXPIRED
+      description: |
+        EXPIRED не выставляется фоновой задачей, а вычисляется при чтении
+        (`expires_at < now()`) — иначе состояние зависит от того, жив ли воркер.
+    TimestampNullable:
+      type: string
+      format: date-time
+      nullable: true
+    Invitation:
+      type: object
+      required:
+        - id
+        - email
+        - role
+        - status
+        - expiresAt
+        - createdAt
+      description: Представление для админки. Сам токен здесь не отдаётся никогда — он существует только в письме.
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        email:
+          $ref: '#/components/schemas/Email'
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          $ref: '#/components/schemas/InvitationStatus'
+        expiresAt:
+          $ref: '#/components/schemas/Timestamp'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        invitedByEmail:
+          $ref: '#/components/schemas/Email'
+        acceptedAt:
+          $ref: '#/components/schemas/TimestampNullable'
+        lastSentAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Письмо уходит асинхронно через outbox, поэтому «создано» и «отправлено» — разные моменты.
+    InvitationList:
+      type: object
+      required:
+        - items
+        - page
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invitation'
+        page:
+          $ref: '#/components/schemas/PageInfo'
+    CreateInvitationRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        role:
+          allOf:
+            - $ref: '#/components/schemas/Role'
+          default: EMPLOYEE
+          description: ADMIN допустим — иначе компания навсегда завязана на одного человека.
+    InvitationPreview:
+      type: object
+      required:
+        - companyName
+        - email
+        - role
+        - expiresAt
+        - requiresRegistration
+      description: |
+        Отдаётся по токену без аутентификации — токен здесь и есть секрет
+        (32 байта из crypto/rand; в БД лежит только его sha256).
+        Нужен, чтобы Next отрендерил на SSR страницу «Вас пригласили в Acme»,
+        а не пустой спиннер.
+      properties:
+        companyName:
+          type: string
+        companyLogoUrl:
+          $ref: '#/components/schemas/URLNullable'
+        email:
+          $ref: '#/components/schemas/Email'
+        role:
+          $ref: '#/components/schemas/Role'
+        expiresAt:
+          $ref: '#/components/schemas/Timestamp'
+        requiresRegistration:
+          type: boolean
+          description: |
+            true — учётки с этим адресом ещё нет, фронт показывает форму пароля.
+            false — достаточно войти существующей.
+    AcceptInvitationRequest:
+      type: object
+      description: |
+        Адрес приглашения не передаётся и не редактируется: принять приглашение
+        может только владелец того самого ящика. Токена самого по себе мало —
+        письма пересылают, а несовпадение даёт `email_mismatch`.
+      properties:
+        password:
+          allOf:
+            - $ref: '#/components/schemas/Password'
+          description: |
+            Обязателен ровно тогда, когда `requiresRegistration = true`:
+            регистрация, членство и черновик профиля создаются одной транзакцией.
+            Если учётка уже есть — поле игнорируется, требуется валидный access-токен.
+    AcceptInvitationResponse:
+      type: object
+      required:
+        - companyId
+        - role
+        - profileId
+      properties:
+        companyId:
+          $ref: '#/components/schemas/UUID'
+        role:
+          $ref: '#/components/schemas/Role'
+        profileId:
+          $ref: '#/components/schemas/UUID'
+        profileSlug:
+          $ref: '#/components/schemas/Slug'
+        accessToken:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AccessToken'
+          description: Приходит только в ветке регистрации — вместе с refresh-cookie. При приёме уже вошедшим пользователем равен null.
+    URL:
+      type: string
+      format: uri
+      maxLength: 2048
+    Crop:
+      type: object
+      required:
+        - x
+        - 'y'
+        - size
+      description: Координаты в пикселях исходного изображения; область всегда квадратная.
+      properties:
+        x:
+          type: integer
+          minimum: 0
+        'y':
+          type: integer
+          minimum: 0
+        size:
+          type: integer
+          minimum: 1
+    Avatar:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          $ref: '#/components/schemas/URL'
+        crop:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Crop'
+          description: |
+            Кроп хранится метаданными, а не выжигается в файл: исходник остаётся
+            квадратным и кроп можно переиграть. Круг рисуется маской при рендере —
+            в самой картинке его нет, PNG-карточка кладётся на непрозрачный фон.
+    ProfilePosition:
+      type: object
+      required:
+        - title
+        - custom
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+          description: null, если должность введена вручную.
+        title:
+          type: string
+        custom:
+          type: boolean
+    ProfileTag:
+      type: object
+      required:
+        - title
+        - custom
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDNullable'
+        title:
+          type: string
+          maxLength: 75
+        custom:
+          type: boolean
+    Contacts:
+      type: object
+      properties:
+        phone:
+          type: string
+          maxLength: 32
+          nullable: true
+        whatsapp:
+          type: string
+          maxLength: 32
+          nullable: true
+          description: Номер как ввёл пользователь; ссылка wa.me/{номер} собирается на выдаче, в базе не хранится.
+        telegram:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: Аккаунт без @; ссылка t.me/{аккаунт} собирается на выдаче.
+    Profile:
+      type: object
+      required:
+        - id
+        - companyId
+        - slug
+        - status
+        - tags
+        - showCompanyContacts
+        - createdAt
+        - updatedAt
+      description: Полное представление. Доступно владельцу профиля и ADMIN его компании.
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        companyId:
+          $ref: '#/components/schemas/UUID'
+        slug:
+          $ref: '#/components/schemas/Slug'
+        status:
+          $ref: '#/components/schemas/ProfileStatus'
+        fullName:
+          type: string
+          maxLength: 120
+          nullable: true
+        avatar:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Avatar'
+        position:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ProfilePosition'
+        aboutHtml:
+          type: string
+          maxLength: 8000
+          nullable: true
+          description: |
+            Уже санитизированный HTML (bluemonday, allowlist: p, br, b/strong,
+            i/em, u, h2, h3, ul/ol/li). Санитизация происходит на записи, а не
+            на чтении: иначе апгрейд санитайзера молча меняет отображение
+            старых записей. На выдаче фильтр применяется повторно — как страховка.
+        tags:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/ProfileTag'
+          description: |
+            До трёх на любом этапе; ровно три требуется для публикации.
+            Ограничение живёт в use-case, а не в БД — deferred constraint
+            на «ровно 3» усложняет каждую промежуточную запись.
+        contacts:
+          $ref: '#/components/schemas/Contacts'
+        showCompanyContacts:
+          type: boolean
+          description: Выносить ли адрес и телефоны компании на страницу (пункт ТЗ про доп. информацию).
+        cardImageUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+          nullable: true
+          description: |
+            PNG-карточка. Имя файла — хэш от (данные профиля + версия рендерера),
+            поэтому URL меняется сам при любой правке, а правка макета в коде
+            разом обесценивает все старые картинки без ручной чистки.
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        updatedAt:
+          $ref: '#/components/schemas/Timestamp'
+    UpdateProfileRequest:
+      type: object
+      description: |
+        PATCH-семантика. Правила, которые схемой не выражаются и живут в домене:
+          * positionId и positionCustom взаимоисключающи (в БД — CHECK-констрейнт);
+          * tagIds + customTags суммарно не больше трёх;
+          * публикация требует ровно трёх тегов и непустого fullName.
+      properties:
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 120
+        positionId:
+          $ref: '#/components/schemas/UUIDNullable'
+        positionCustom:
+          type: string
+          maxLength: 120
+          nullable: true
+        aboutHtml:
+          type: string
+          maxLength: 8000
+          nullable: true
+          description: Принимается сырой HTML из редактора; на сервере санитизируется, ответ содержит уже очищенный вариант.
+        tagIds:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/UUID'
+        customTags:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+            minLength: 1
+            maxLength: 75
+        contacts:
+          $ref: '#/components/schemas/Contacts'
+        showCompanyContacts:
+          type: boolean
+    UpdateSlugRequest:
+      type: object
+      required:
+        - slug
+      properties:
+        slug:
+          $ref: '#/components/schemas/Slug'
+    UpdateProfileStatusRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - PUBLISHED
+            - BLOCKED
+          description: Блокировка и разблокировка — операция ADMIN; публикация — владельца.
+    SlugAvailability:
+      type: object
+      required:
+        - slug
+        - available
+      properties:
+        slug:
+          $ref: '#/components/schemas/Slug'
+        available:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+          description: '`slug_taken` либо `slug_reserved` (admin, api, employee, login и прочие служебные пути).'
+  parameters:
+    Slug:
+      name: slug
+      in: path
+      required: true
+      description: Адрес визитки из публичного URL.
+      schema:
+        $ref: '#/components/schemas/SlugLookup'
+    CompanyId:
+      name: companyId
+      in: path
+      required: true
+      description: Идентификатор компании (тенанта).
+      schema:
+        $ref: '#/components/schemas/UUID'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        default: 0
+    Token:
+      name: token
+      in: path
+      required: true
+      description: Одноразовый токен из письма. В базе хранится только его sha256.
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 128
+    ProfileId:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UUID'
+  responses:
+    Unexpected:
+      description: |
+        Непредвиденная ошибка. Присутствует у каждой операции не для красоты:
+        ogen генерирует хук `NewError` только когда `default` объявлен везде,
+        а без него любая паника или незамапленная ошибка уходит клиенту
+        голым 500 без тела, и фронт не может её отличить от сетевого сбоя.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: |
+        Ресурс не найден либо не принадлежит текущему тенанту — эти два случая
+        намеренно неразличимы, иначе по кодам ответов перебираются чужие id.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Превышен лимит запросов.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Через сколько секунд повторять.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: Тело запроса не разобрано или нарушены ограничения схемы.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Access-токен отсутствует, истёк или отозван.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Пользователь аутентифицирован, но роли в этой компании недостаточно.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: Файл превышает допустимый размер.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnsupportedMediaType:
+      description: |
+        Тип файла не поддерживается. Проверяется по сигнатуре содержимого,
+        а не по заголовку `Content-Type` и не по расширению — и то и другое
+        задаёт клиент.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Конфликт состояния (занятый слаг, повторное приглашение, последний админ).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  headers:
+    ETag:
+      schema:
+        type: string
+      description: Хэш содержимого; клиент возвращает его в `If-None-Match`.
+    CacheControlPublic:
+      schema:
+        type: string
+      description: '`public, max-age=60, stale-while-revalidate=300` — страница может измениться в любой момент.'
+    RefreshCookie:
+      schema:
+        type: string
+      description: |
+        `vcard_refresh=<opaque>; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=2592000`
+
+        `Path` сужен до `/auth` — на остальные запросы cookie не ходит вовсе.
+        `SameSite=Lax` достаточно, потому что refresh отправляется только
+        методом POST, а Lax запрещает межсайтовые POST-запросы.
+    ClearRefreshCookie:
+      schema:
+        type: string
+      description: '`vcard_refresh=; Max-Age=0; Path=/api/v1/auth`'

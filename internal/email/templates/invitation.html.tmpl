@@ -1,0 +1,36 @@
+{{/*
+  Вёрстка нарочно примитивная: таблиц нет, внешних стилей нет, всё инлайном.
+  Почтовые клиенты режут <style> из <head>, а Gmail ещё и переписывает
+  классы — любая «нормальная» вёрстка здесь разъезжается.
+*/}}
+<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:1.5;color:#1a1a1a;max-width:520px">
+  <p>Здравствуйте!</p>
+
+  <p>
+    <strong>{{ .InviterEmail }}</strong> приглашает вас присоединиться к компании
+    «<strong>{{ .CompanyName }}</strong>» в сервисе визиток{{ if .IsAdmin }}
+    с правами администратора{{ end }}.
+  </p>
+
+  <p style="margin:28px 0">
+    <a href="{{ .AcceptURL }}"
+       style="display:inline-block;padding:12px 22px;background:#2f6feb;color:#ffffff;
+              text-decoration:none;border-radius:6px;font-weight:600">
+      Принять приглашение
+    </a>
+  </p>
+
+  <p style="color:#666;font-size:14px">
+    Если кнопка не работает, скопируйте ссылку в адресную строку:<br>
+    <a href="{{ .AcceptURL }}" style="color:#2f6feb;word-break:break-all">{{ .AcceptURL }}</a>
+  </p>
+
+  <p style="color:#666;font-size:14px">
+    Ссылка действует до {{ .ExpiresAt }} и работает один раз.
+  </p>
+
+  <p style="color:#666;font-size:14px">
+    Если вы не ожидали этого письма, просто не переходите по ссылке —
+    без вашего участия ничего не произойдёт.
+  </p>
+</div>

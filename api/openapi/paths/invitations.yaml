@@ -1,0 +1,286 @@
+# Приглашения.
+#
+# Два разных пространства маршрутов, и это не случайность:
+#   /companies/{companyId}/invitations  — управление, роль ADMIN;
+#   /invitations/{token}                — приём, аутентификация не требуется.
+# Токен сам по себе является учётными данными, поэтому вторая группа
+# не может жить под companyId: приглашённый ещё не знает id компании
+# и не имеет к ней доступа.
+
+Collection:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+  post:
+    tags: [invitations]
+    operationId: createInvitation
+    summary: Пригласить сотрудника
+    description: |
+      Роль ADMIN. Приглашение и письмо создаются одной транзакцией:
+      письмо кладётся в outbox, отдельный воркер разгребает очередь
+      с ретраями. Синхронная отправка означала бы, что недоступность
+      почтового провайдера роняет создание приглашения.
+
+      Токен — 32 байта из crypto/rand; в базе хранится только его sha256,
+      сам токен существует лишь в письме. Утечка дампа не даёт вступить
+      ни в одну компанию.
+
+      Повторное приглашение на адрес, у которого уже есть действующее,
+      отклоняется с `409` — на это стоит частичный уникальный индекс.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/invitation.yaml#/schemas/CreateInvitationRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '201':
+        description: Приглашение создано, письмо поставлено в очередь.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/invitation.yaml#/schemas/Invitation'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '409':
+        description: На этот адрес уже есть действующее приглашение либо он уже состоит в компании.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        description: |
+          Превышен суточный лимит приглашений. Ограничение обязательное:
+          без него администратор рассылает письма с вашего домена на чужие
+          адреса, и домен уезжает в спам-листы.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+  get:
+    tags: [invitations]
+    operationId: listInvitations
+    summary: Приглашения компании
+    description: |
+      Роль ADMIN. Токен не отдаётся ни в каком виде — в базе его и нет,
+      только хэш.
+    parameters:
+      - $ref: '../components/common.yaml#/parameters/Limit'
+      - $ref: '../components/common.yaml#/parameters/Offset'
+      - name: status
+        in: query
+        required: false
+        schema:
+          $ref: '../components/invitation.yaml#/schemas/InvitationStatus'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Приглашения.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/invitation.yaml#/schemas/InvitationList'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+Item:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - name: invitationId
+      in: path
+      required: true
+      schema:
+        $ref: '../components/common.yaml#/schemas/UUID'
+  delete:
+    tags: [invitations]
+    operationId: revokeInvitation
+    summary: Отозвать приглашение
+    description: |
+      Роль ADMIN. Строка не удаляется, а переводится в REVOKED: история
+      «кого звали и кто отозвал» переживает отзыв. Ссылка из письма
+      перестаёт работать немедленно.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Приглашение отозвано.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        description: Приглашение уже принято — отзывать нечего, исключать нужно сотрудника.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+Resend:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - name: invitationId
+      in: path
+      required: true
+      schema:
+        $ref: '../components/common.yaml#/schemas/UUID'
+  post:
+    tags: [invitations]
+    operationId: resendInvitation
+    summary: Отправить приглашение повторно
+    description: |
+      Роль ADMIN. Всегда выпускает НОВЫЙ токен, а старый инвалидирует:
+      исходный в базе не хранится, повторить прежнее письмо технически
+      невозможно. Срок жизни отсчитывается заново.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Новое письмо поставлено в очередь.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/invitation.yaml#/schemas/Invitation'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        description: Приглашение уже принято или отозвано.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+# --- приём (аутентификация не требуется) ----------------------------------
+
+Preview:
+  parameters:
+    - $ref: '#/x-params/Token'
+  get:
+    tags: [invitations]
+    operationId: getInvitationPreview
+    summary: Что за приглашение
+    description: |
+      Нужен, чтобы Next отрендерил на SSR страницу «Вас пригласили в Acme»
+      вместо пустого спиннера, и чтобы фронт знал, показывать форму пароля
+      или кнопку входа.
+
+      Токен передаётся в пути и потому попадает в журналы доступа
+      и в заголовок `Referer`. Оба маршрута приёма исключены из логирования
+      пути, а страница приглашения отдаётся с `Referrer-Policy: no-referrer`.
+    security: []
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Действующее приглашение.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/invitation.yaml#/schemas/InvitationPreview'
+      '404':
+        description: Токен неизвестен, отозван, уже использован или истёк.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Accept:
+  parameters:
+    - $ref: '#/x-params/Token'
+  post:
+    tags: [invitations]
+    operationId: acceptInvitation
+    summary: Принять приглашение
+    description: |
+      Аутентификация необязательна, и от неё зависит ветка:
+
+      * **учётки с этим адресом нет** — токена достаточно, в теле нужен
+        пароль. Пользователь, членство и черновик профиля создаются одной
+        транзакцией, почта сразу считается подтверждённой: письмо уже дошло.
+      * **учётка есть** — требуется действующий access-токен, пароль игнорируется.
+      * **вошли под другим пользователем** — `403` с `email_mismatch`,
+        а не молчаливое принятие: письма пересылают, и токена самого по себе
+        для вступления недостаточно.
+      * **уже состоит в компании** — `200`, приглашение просто закрывается,
+        членство не дублируется.
+    security:
+      - {}
+      - bearerAuth: []
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: '../components/invitation.yaml#/schemas/AcceptInvitationRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: |
+          Приглашение принято. `accessToken` присутствует только в ветке
+          регистрации — вместе с ним ставится refresh-cookie.
+        headers:
+          Set-Cookie:
+            schema:
+              type: string
+            description: Только в ветке регистрации; формат — как у POST /auth/login.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/invitation.yaml#/schemas/AcceptInvitationResponse'
+      '400':
+        description: Нужен пароль (новая учётка), а он не передан либо не удовлетворяет требованиям.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '401':
+        description: Учётка с этим адресом уже есть — требуется вход.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '403':
+        description: Вход выполнен под другим адресом (`email_mismatch`).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '404':
+        description: Токен неизвестен, отозван, уже использован или истёк.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+x-params:
+  Token:
+    name: token
+    in: path
+    required: true
+    description: Одноразовый токен из письма. В базе хранится только его sha256.
+    schema:
+      type: string
+      minLength: 32
+      maxLength: 128

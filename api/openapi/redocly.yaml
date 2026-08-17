@@ -1,0 +1,16 @@
+extends:
+  - recommended
+
+apis:
+  vcard:
+    root: ./openapi.yaml
+
+rules:
+  # localhost-сервер нужен фронту для локальной разработки
+  no-server-example.com: off
+  # refreshCookie объявлена заранее, её единственный потребитель — POST /auth/refresh
+  no-unused-components: warn
+  operation-operationId: error
+  operation-summary: error
+  operation-4xx-response: error
+  security-defined: error

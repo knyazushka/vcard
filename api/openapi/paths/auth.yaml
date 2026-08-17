@@ -1,0 +1,204 @@
+# Аутентификация.
+#
+# Схема токенов: короткий access (JWT, 15 минут) в теле ответа + opaque refresh
+# в httpOnly-cookie. Refresh не JWT сознательно — отозвать JWT невозможно,
+# а отзыв и есть единственное, ради чего refresh нужен.
+#
+# Access-токен несёт только `sub` и `sid`. Роль и компания резолвятся на каждом
+# запросе: иначе исключение сотрудника из компании вступало бы в силу через
+# четверть часа, а при тенантной модели это уже доступ к чужим данным.
+
+Register:
+  post:
+    tags: [auth]
+    operationId: register
+    summary: Регистрация
+    description: |
+      Свободная: членства пользователь при этом не получает и до вступления
+      в компанию не может ничего, кроме как создать свою или принять приглашение.
+
+      Регистрация по приглашению идёт другим путём — POST /invitations/{token}/accept,
+      где учётка, членство и черновик профиля создаются одной транзакцией.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/auth.yaml#/schemas/RegisterRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '201':
+        description: Учётка создана, сессия открыта.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/RefreshCookie'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/auth.yaml#/schemas/AccessToken'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '409':
+        description: Адрес уже занят.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Login:
+  post:
+    tags: [auth]
+    operationId: login
+    summary: Вход
+    description: |
+      Неверная пара логин/пароль и несуществующий адрес дают один и тот же
+      ответ 401 с кодом `unauthenticated` — иначе форма входа превращается
+      в перебиратель зарегистрированных адресов.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/auth.yaml#/schemas/LoginRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Сессия открыта.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/RefreshCookie'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/auth.yaml#/schemas/AccessToken'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Refresh:
+  post:
+    tags: [auth]
+    operationId: refreshToken
+    summary: Обновить access-токен
+    description: |
+      Единственная операция, работающая по refresh-cookie, — тела запроса нет
+      и быть не должно: токен до JavaScript не доходит.
+
+      Refresh ротируется при каждом вызове. Предъявление уже израсходованного
+      токена трактуется как кража и гасит всю family сессий, а не только
+      предъявленный экземпляр: легитимный клиент израсходованный токен
+      предъявить не может, он его уже обменял.
+    security:
+      - refreshCookie: []
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Выдан новый access; refresh-cookie заменена.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/RefreshCookie'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/auth.yaml#/schemas/AccessToken'
+      '401':
+        description: Cookie отсутствует, истекла, отозвана или предъявлена повторно.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/ClearRefreshCookie'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Logout:
+  post:
+    tags: [auth]
+    operationId: logout
+    summary: Выход
+    description: |
+      Гасит текущую сессию и стирает cookie. Идемпотентна: повторный вызов
+      без действующей сессии всё равно отвечает 204, потому что «выйти»
+      и «уже вышел» для клиента — одно состояние.
+
+      Ранее выданный access-токен остаётся формально валидным до истечения
+      своих 15 минут. Это цена stateless-проверки подписи; если понадобится
+      мгновенный отзыв, добавится проверка `sid` по хранилищу сессий.
+    security:
+      - bearerAuth: []
+      - refreshCookie: []
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Сессия закрыта.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/ClearRefreshCookie'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+
+LogoutAll:
+  post:
+    tags: [auth]
+    operationId: logoutAll
+    summary: Выйти на всех устройствах
+    description: Гасит все сессии пользователя. Нужна после смены пароля и как реакция на подозрение о краже.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Все сессии закрыты.
+        headers:
+          Set-Cookie:
+            $ref: '#/x-headers/ClearRefreshCookie'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+
+Me:
+  get:
+    tags: [auth]
+    operationId: getMe
+    summary: Текущий пользователь и его членства
+    description: |
+      Отдаёт список компаний с ролями — из него фронт строит переключатель
+      тенанта и понимает, какие разделы админки показывать.
+      Пустой `memberships` — нормальное состояние сразу после регистрации.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Пользователь и его членства.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/auth.yaml#/schemas/Me'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+
+x-headers:
+  RefreshCookie:
+    schema:
+      type: string
+    description: |
+      `vcard_refresh=<opaque>; HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth; Max-Age=2592000`
+
+      `Path` сужен до `/auth` — на остальные запросы cookie не ходит вовсе.
+      `SameSite=Lax` достаточно, потому что refresh отправляется только
+      методом POST, а Lax запрещает межсайтовые POST-запросы.
+  ClearRefreshCookie:
+    schema:
+      type: string
+    description: '`vcard_refresh=; Max-Age=0; Path=/api/v1/auth`'

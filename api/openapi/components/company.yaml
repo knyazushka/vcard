@@ -1,0 +1,213 @@
+# Компания-тенант, её справочники (должности, теги) и состав сотрудников.
+
+schemas:
+  Company:
+    type: object
+    required: [id, name, createdAt]
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      name:
+        type: string
+        minLength: 1
+        maxLength: 200
+      logoUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+      address:
+        type: string
+        maxLength: 500
+        nullable: true
+      phones:
+        type: array
+        maxItems: 10
+        items:
+          $ref: '#/schemas/Phone'
+      createdAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+
+  CompanyPublic:
+    type: object
+    required: [name]
+    description: |
+      Проекция компании для публичной визитки. Отдельный тип, а не Company
+      с omitempty: при добавлении поля в Company оно не утечёт сюда само.
+      Адрес и телефоны приходят, только если сотрудник включил их показ.
+    properties:
+      name:
+        type: string
+      logoUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+      address:
+        type: string
+        nullable: true
+      phones:
+        type: array
+        items:
+          $ref: '#/schemas/Phone'
+
+  Phone:
+    type: object
+    required: [value]
+    properties:
+      value:
+        type: string
+        maxLength: 32
+        description: Хранится в E.164 после нормализации; на вход принимается в любом виде.
+        example: '+491752607358'
+      label:
+        type: string
+        maxLength: 40
+        nullable: true
+        example: Офис
+
+  CreateCompanyRequest:
+    type: object
+    required: [name]
+    description: |
+      Создатель компании автоматически становится её ADMIN — глобального
+      администратора в системе нет, тенант заводится self-service.
+    properties:
+      name:
+        type: string
+        minLength: 1
+        maxLength: 200
+      address:
+        type: string
+        maxLength: 500
+      phones:
+        type: array
+        maxItems: 10
+        items:
+          $ref: '#/schemas/Phone'
+
+  UpdateCompanyRequest:
+    type: object
+    description: PATCH-семантика — отсутствующее поле не меняется, явный null очищает.
+    properties:
+      name:
+        type: string
+        minLength: 1
+        maxLength: 200
+      address:
+        type: string
+        maxLength: 500
+        nullable: true
+      phones:
+        type: array
+        maxItems: 10
+        items:
+          $ref: '#/schemas/Phone'
+
+  # --- справочники --------------------------------------------------------
+
+  Position:
+    type: object
+    required: [id, title]
+    description: Должность из справочника компании. Справочники у каждого тенанта свои.
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      title:
+        type: string
+        minLength: 1
+        maxLength: 120
+      usageCount:
+        type: integer
+        format: int32
+        description: Сколько профилей ссылается — чтобы админ видел, что удаление не пройдёт даром.
+
+  PositionRequest:
+    type: object
+    required: [title]
+    properties:
+      title:
+        type: string
+        minLength: 1
+        maxLength: 120
+
+  Tag:
+    type: object
+    required: [id, title]
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      title:
+        type: string
+        minLength: 1
+        maxLength: 75
+      usageCount:
+        type: integer
+        format: int32
+
+  TagRequest:
+    type: object
+    required: [title]
+    properties:
+      title:
+        type: string
+        minLength: 1
+        maxLength: 75
+        description: |
+          Нормализуется перед проверкой уникальности (trim, схлопывание пробелов,
+          сравнение без учёта регистра) — иначе справочник зарастает
+          «Golang» / «golang» / «GoLang».
+
+  # --- состав -------------------------------------------------------------
+
+  Employee:
+    type: object
+    required: [userId, email, role, joinedAt]
+    description: Строка списка сотрудников в админке.
+    properties:
+      userId:
+        $ref: './common.yaml#/schemas/UUID'
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      role:
+        $ref: './auth.yaml#/schemas/Role'
+      fullName:
+        type: string
+        nullable: true
+      profileId:
+        $ref: './common.yaml#/schemas/UUIDNullable'
+      profileSlug:
+        $ref: './common.yaml#/schemas/SlugNullable'
+      profileStatus:
+        type: string
+        nullable: true
+        allOf:
+          - $ref: './profile.yaml#/schemas/ProfileStatus'
+      joinedAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+
+  UpdateEmployeeRequest:
+    type: object
+    required: [role]
+    properties:
+      role:
+        $ref: './auth.yaml#/schemas/Role'
+    description: |
+      Понижение последнего ADMIN отклоняется с `last_admin`: иначе компания
+      остаётся без управления и чинится только руками в SQL.
+
+  CompanyList:
+    type: object
+    required: [items, page]
+    properties:
+      items:
+        type: array
+        items:
+          $ref: '#/schemas/Company'
+      page:
+        $ref: './common.yaml#/schemas/PageInfo'
+
+  EmployeeList:
+    type: object
+    required: [items, page]
+    properties:
+      items:
+        type: array
+        items:
+          $ref: '#/schemas/Employee'
+      page:
+        $ref: './common.yaml#/schemas/PageInfo'

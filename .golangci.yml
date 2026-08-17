@@ -1,0 +1,51 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - revive        # стиль и документирование экспортированного
+    - errcheck      # непроверенные ошибки
+    - errorlint     # сравнение ошибок мимо errors.Is/As
+    - bodyclose     # незакрытые тела ответов
+    - noctx         # HTTP-запросы без контекста
+    - sqlclosecheck
+    - rowserrcheck
+    - misspell
+    - unconvert
+    - gosec
+
+  settings:
+    revive:
+      rules:
+        # Комментарий к пакету нужен ровно один на пакет, а не в каждом
+        # файле: повторение — это отдельная ошибка, а не вежливость.
+        - name: package-comments
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: indent-error-flow
+        - name: errorf
+        - name: context-as-argument
+        - name: unexported-return
+
+    gosec:
+      excludes:
+        # Дефолтные права 0755/0644 для каталогов и файлов хранилища
+        # выставлены осознанно.
+        - G301
+        - G306
+
+  exclusions:
+    rules:
+      # В тестах допустимы длинные функции и необработанные ошибки закрытия.
+      - path: _test\.go
+        linters: [errcheck, gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

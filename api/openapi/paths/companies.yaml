@@ -1,0 +1,447 @@
+# Компании-тенанты, их справочники и состав.
+#
+# Тенант определяется путём: companyId стоит в каждом маршруте, отдельного
+# заголовка активного тенанта нет. Членство и роль проверяются на каждом
+# запросе — access-токен их не несёт.
+#
+# Ресурс, не принадлежащий компании из пути, отдаёт 404, а не 403: иначе
+# по кодам ответов перебираются чужие идентификаторы.
+
+Collection:
+  post:
+    tags: [companies]
+    operationId: createCompany
+    summary: Создать компанию
+    description: |
+      Доступна любому зарегистрированному пользователю: глобального
+      администратора в системе нет, тенант заводится self-service.
+      Создатель в той же транзакции получает членство с ролью ADMIN —
+      компания без администратора существовать не может ни мгновения.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/CreateCompanyRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '201':
+        description: Компания создана, вызывающий стал её администратором.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Company'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Item:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+  get:
+    tags: [companies]
+    operationId: getCompany
+    summary: Карточка компании
+    description: Доступна любому участнику — сотруднику она нужна, чтобы показать реквизиты на своей странице.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Компания.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Company'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+  patch:
+    tags: [companies]
+    operationId: updateCompany
+    summary: Изменить компанию
+    description: Роль ADMIN. Отсутствующее поле не меняется, явный null очищает.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/UpdateCompanyRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Обновлённая компания.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Company'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+Logo:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+  put:
+    tags: [companies]
+    operationId: uploadCompanyLogo
+    summary: Загрузить логотип
+    description: |
+      Роль ADMIN. PNG, JPEG или WebP, не больше 2 МБ.
+
+      Логотипы прилетают любого размера и с альфой и без; изображение
+      приводится к фиксированной высоте сразу при загрузке, а не при каждом
+      рендере карточки. Тип определяется по сигнатуре файла: `Content-Type`
+      и расширение задаёт клиент, доверять им нельзя.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [file]
+            properties:
+              file:
+                type: string
+                format: binary
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Компания с обновлённым логотипом.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Company'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '413':
+        $ref: '../components/common.yaml#/responses/PayloadTooLarge'
+      '415':
+        $ref: '../components/common.yaml#/responses/UnsupportedMediaType'
+  delete:
+    tags: [companies]
+    operationId: deleteCompanyLogo
+    summary: Удалить логотип
+    description: Роль ADMIN. Идемпотентна.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Логотипа больше нет.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+# --- справочники ----------------------------------------------------------
+
+Positions:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+  get:
+    tags: [companies]
+    operationId: listPositions
+    summary: Должности компании
+    description: |
+      Виден любому участнику — из этого списка сотрудник выбирает должность.
+      Справочник у каждого тенанта свой; при создании компании в него
+      копируется общий стартовый набор, иначе новый администратор
+      начинает с пустого экрана и бросает онбординг.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Должности.
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '../components/company.yaml#/schemas/Position'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+  post:
+    tags: [companies]
+    operationId: createPosition
+    summary: Добавить должность
+    description: Роль ADMIN.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/PositionRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '201':
+        description: Должность создана.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Position'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '409':
+        $ref: '../components/common.yaml#/responses/Conflict'
+
+PositionItem:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - name: positionId
+      in: path
+      required: true
+      schema:
+        $ref: '../components/common.yaml#/schemas/UUID'
+  patch:
+    tags: [companies]
+    operationId: updatePosition
+    summary: Переименовать должность
+    description: Роль ADMIN. Название меняется сразу во всех профилях, которые на неё ссылаются.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/PositionRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Должность обновлена.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Position'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        $ref: '../components/common.yaml#/responses/Conflict'
+  delete:
+    tags: [companies]
+    operationId: deletePosition
+    summary: Удалить должность
+    description: |
+      Роль ADMIN. Профили, ссылавшиеся на неё, сохраняют название как
+      введённое вручную: молча обнулять должность живого сотрудника нельзя,
+      он об этом не узнает и увидит пустое место на своей визитке.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Должность удалена.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+Tags:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+  get:
+    tags: [companies]
+    operationId: listTags
+    summary: Теги компании
+    description: Виден любому участнику — из этого списка сотрудник набирает свои три тега.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Теги.
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '../components/company.yaml#/schemas/Tag'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+  post:
+    tags: [companies]
+    operationId: createTag
+    summary: Добавить тег
+    description: |
+      Роль ADMIN. Название нормализуется перед проверкой уникальности —
+      без этого справочник зарастает вариантами одного и того же слова
+      в разном регистре.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/TagRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '201':
+        description: Тег создан.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Tag'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '409':
+        description: Тег с таким нормализованным названием уже есть.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+TagItem:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - name: tagId
+      in: path
+      required: true
+      schema:
+        $ref: '../components/common.yaml#/schemas/UUID'
+  delete:
+    tags: [companies]
+    operationId: deleteTag
+    summary: Удалить тег
+    description: |
+      Роль ADMIN. Как и с должностью, у профилей тег остаётся —
+      превращается в пользовательский.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Тег удалён.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+# --- состав ---------------------------------------------------------------
+
+Employees:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - $ref: '../components/common.yaml#/parameters/Limit'
+    - $ref: '../components/common.yaml#/parameters/Offset'
+  get:
+    tags: [companies]
+    operationId: listEmployees
+    summary: Сотрудники компании
+    description: Роль ADMIN. Содержит адреса почты, поэтому рядовому участнику недоступен.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Сотрудники.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/EmployeeList'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+EmployeeItem:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/CompanyId'
+    - name: userId
+      in: path
+      required: true
+      schema:
+        $ref: '../components/common.yaml#/schemas/UUID'
+  patch:
+    tags: [companies]
+    operationId: updateEmployeeRole
+    summary: Изменить роль сотрудника
+    description: |
+      Роль ADMIN. Понижение последнего администратора отклоняется
+      с кодом `last_admin` — иначе компания остаётся без управления
+      и чинится только руками в базе.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/company.yaml#/schemas/UpdateEmployeeRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Роль изменена.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/company.yaml#/schemas/Employee'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        $ref: '../components/common.yaml#/responses/Conflict'
+  delete:
+    tags: [companies]
+    operationId: removeEmployee
+    summary: Исключить сотрудника
+    description: |
+      Роль ADMIN. Членство удаляется, профиль переходит в ARCHIVED,
+      его страница перестаёт открываться — но слаг остаётся занятым,
+      как и при блокировке. Исключение последнего администратора
+      отклоняется с `last_admin`.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Сотрудник исключён.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        $ref: '../components/common.yaml#/responses/Conflict'

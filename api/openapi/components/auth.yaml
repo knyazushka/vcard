@@ -1,0 +1,99 @@
+# Регистрация, вход, обновление токена, текущий пользователь.
+
+schemas:
+  RegisterRequest:
+    type: object
+    required: [email, password]
+    properties:
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      password:
+        $ref: './common.yaml#/schemas/Password'
+    description: |
+      Свободная регистрация. Пользователь без членства не может ничего,
+      кроме как создать компанию или принять приглашение — это и есть
+      единственные два входа в тенант.
+
+  LoginRequest:
+    type: object
+    required: [email, password]
+    properties:
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      password:
+        type: string
+        format: password
+
+  AccessToken:
+    type: object
+    required: [accessToken, tokenType, expiresIn]
+    properties:
+      accessToken:
+        type: string
+        description: |
+          Хранить в памяти JS. НЕ в localStorage: там XSS крадёт не 15 минут,
+          а постоянный доступ. Refresh уходит отдельно, в httpOnly cookie,
+          и до JavaScript не доходит вовсе.
+      tokenType:
+        type: string
+        enum: [Bearer]
+      expiresIn:
+        type: integer
+        format: int32
+        description: Секунд до истечения access-токена.
+        example: 900
+
+  User:
+    type: object
+    required: [id, email, createdAt]
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      emailVerified:
+        type: boolean
+        description: |
+          Регистрация по приглашению сразу даёт true — письмо уже дошло,
+          второе подтверждение было бы ритуалом.
+      createdAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+
+  Membership:
+    type: object
+    required: [companyId, companyName, role]
+    properties:
+      companyId:
+        $ref: './common.yaml#/schemas/UUID'
+      companyName:
+        type: string
+      companyLogoUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+      role:
+        $ref: '#/schemas/Role'
+      profileId:
+        type: string
+        format: uuid
+        nullable: true
+        description: Черновик профиля создаётся вместе с членством, поэтому null здесь — аномалия, а не норма.
+
+  Role:
+    type: string
+    enum: [ADMIN, EMPLOYEE]
+    description: |
+      Роль — свойство связки пользователь↔компания, а не пользователя.
+      Один человек может быть админом в одной компании и сотрудником в другой.
+      EMPLOYEE — та самая «минимальная роль» из ТЗ, с которой доступна
+      генерация карточки.
+
+  Me:
+    type: object
+    required: [user, memberships]
+    properties:
+      user:
+        $ref: '#/schemas/User'
+      memberships:
+        type: array
+        items:
+          $ref: '#/schemas/Membership'
+        description: 'Пустой массив — валидное состояние: зарегистрировался, но ещё никуда не вступил.'

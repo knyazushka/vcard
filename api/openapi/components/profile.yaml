@@ -1,0 +1,293 @@
+# Профиль сотрудника: приватное представление (владелец / админ компании)
+# и публичное (страница визитки, без аутентификации).
+
+schemas:
+  ProfileStatus:
+    type: string
+    enum: [DRAFT, PUBLISHED, BLOCKED, ARCHIVED]
+    description: |
+      DRAFT     — создан вместе с членством, ещё не опубликован.
+      PUBLISHED — виден по ссылке.
+      BLOCKED   — заблокирован админом: отдаётся заглушка, но слаг остаётся занятым.
+      ARCHIVED  — сотрудник исключён из компании; слаг тоже удерживается.
+      Слаг не освобождается ни в одном из состояний — это требование ТЗ,
+      поэтому уникальный индекс по нему безусловный, без partial-условия.
+
+  Profile:
+    type: object
+    required: [id, companyId, slug, status, tags, showCompanyContacts, createdAt, updatedAt]
+    description: Полное представление. Доступно владельцу профиля и ADMIN его компании.
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      companyId:
+        $ref: './common.yaml#/schemas/UUID'
+      slug:
+        $ref: './common.yaml#/schemas/Slug'
+      status:
+        $ref: '#/schemas/ProfileStatus'
+      fullName:
+        type: string
+        maxLength: 120
+        nullable: true
+      avatar:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: '#/schemas/Avatar'
+      position:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: '#/schemas/ProfilePosition'
+      aboutHtml:
+        type: string
+        maxLength: 8000
+        nullable: true
+        description: |
+          Уже санитизированный HTML (bluemonday, allowlist: p, br, b/strong,
+          i/em, u, h2, h3, ul/ol/li). Санитизация происходит на записи, а не
+          на чтении: иначе апгрейд санитайзера молча меняет отображение
+          старых записей. На выдаче фильтр применяется повторно — как страховка.
+      tags:
+        type: array
+        maxItems: 3
+        items:
+          $ref: '#/schemas/ProfileTag'
+        description: |
+          До трёх на любом этапе; ровно три требуется для публикации.
+          Ограничение живёт в use-case, а не в БД — deferred constraint
+          на «ровно 3» усложняет каждую промежуточную запись.
+      contacts:
+        $ref: '#/schemas/Contacts'
+      showCompanyContacts:
+        type: boolean
+        description: Выносить ли адрес и телефоны компании на страницу (пункт ТЗ про доп. информацию).
+      cardImageUrl:
+        type: string
+        format: uri
+        maxLength: 2048
+        nullable: true
+        description: |
+          PNG-карточка. Имя файла — хэш от (данные профиля + версия рендерера),
+          поэтому URL меняется сам при любой правке, а правка макета в коде
+          разом обесценивает все старые картинки без ручной чистки.
+      createdAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+      updatedAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+
+  ProfilePublic:
+    type: object
+    required: [slug, tags]
+    description: |
+      Проекция для страницы визитки. Отдельный тип — здесь нет ни email
+      владельца, ни его роли, ни id. Переиспользовать Profile с занулением
+      полей нельзя: следующее добавленное поле утечёт само.
+    properties:
+      slug:
+        $ref: './common.yaml#/schemas/Slug'
+      fullName:
+        type: string
+        nullable: true
+      avatarUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+      positionTitle:
+        type: string
+        nullable: true
+      aboutHtml:
+        type: string
+        nullable: true
+      tags:
+        type: array
+        maxItems: 3
+        items:
+          type: string
+      links:
+        $ref: '#/schemas/PublicLinks'
+      company:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: './company.yaml#/schemas/CompanyPublic'
+      cardImageUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+
+  PublicProfileResponse:
+    type: object
+    required: [status]
+    description: |
+      Заблокированная страница отвечает 200 с status = BLOCKED и profile = null,
+      а не 404: так Next отрисует человеческую заглушку с корректными
+      OG-тегами вместо страницы ошибки. Слаг при этом остаётся занятым.
+    properties:
+      status:
+        type: string
+        enum: [PUBLISHED, BLOCKED]
+      profile:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: '#/schemas/ProfilePublic'
+
+  Avatar:
+    type: object
+    required: [url]
+    properties:
+      url:
+        $ref: './common.yaml#/schemas/URL'
+      crop:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: '#/schemas/Crop'
+        description: |
+          Кроп хранится метаданными, а не выжигается в файл: исходник остаётся
+          квадратным и кроп можно переиграть. Круг рисуется маской при рендере —
+          в самой картинке его нет, PNG-карточка кладётся на непрозрачный фон.
+
+  Crop:
+    type: object
+    required: [x, y, size]
+    description: Координаты в пикселях исходного изображения; область всегда квадратная.
+    properties:
+      x:
+        type: integer
+        minimum: 0
+      y:
+        type: integer
+        minimum: 0
+      size:
+        type: integer
+        minimum: 1
+
+  ProfilePosition:
+    type: object
+    required: [title, custom]
+    properties:
+      id:
+        type: string
+        format: uuid
+        nullable: true
+        description: null, если должность введена вручную.
+      title:
+        type: string
+      custom:
+        type: boolean
+
+  ProfileTag:
+    type: object
+    required: [title, custom]
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUIDNullable'
+      title:
+        type: string
+        maxLength: 75
+      custom:
+        type: boolean
+
+  Contacts:
+    type: object
+    properties:
+      phone:
+        type: string
+        maxLength: 32
+        nullable: true
+      whatsapp:
+        type: string
+        maxLength: 32
+        nullable: true
+        description: Номер как ввёл пользователь; ссылка wa.me/{номер} собирается на выдаче, в базе не хранится.
+      telegram:
+        type: string
+        maxLength: 64
+        nullable: true
+        description: Аккаунт без @; ссылка t.me/{аккаунт} собирается на выдаче.
+
+  PublicLinks:
+    type: object
+    description: Готовые ссылки — фронт не должен знать правила их сборки.
+    properties:
+      phone:
+        type: string
+        nullable: true
+      whatsapp:
+        type: string
+        format: uri
+        nullable: true
+        example: https://wa.me/491752607358
+      telegram:
+        type: string
+        format: uri
+        nullable: true
+        example: https://t.me/laura
+
+  UpdateProfileRequest:
+    type: object
+    description: |
+      PATCH-семантика. Правила, которые схемой не выражаются и живут в домене:
+        * positionId и positionCustom взаимоисключающи (в БД — CHECK-констрейнт);
+        * tagIds + customTags суммарно не больше трёх;
+        * публикация требует ровно трёх тегов и непустого fullName.
+    properties:
+      fullName:
+        type: string
+        minLength: 1
+        maxLength: 120
+      positionId:
+        $ref: './common.yaml#/schemas/UUIDNullable'
+      positionCustom:
+        type: string
+        maxLength: 120
+        nullable: true
+      aboutHtml:
+        type: string
+        maxLength: 8000
+        nullable: true
+        description: Принимается сырой HTML из редактора; на сервере санитизируется, ответ содержит уже очищенный вариант.
+      tagIds:
+        type: array
+        maxItems: 3
+        items:
+          $ref: './common.yaml#/schemas/UUID'
+      customTags:
+        type: array
+        maxItems: 3
+        items:
+          type: string
+          minLength: 1
+          maxLength: 75
+      contacts:
+        $ref: '#/schemas/Contacts'
+      showCompanyContacts:
+        type: boolean
+
+  UpdateSlugRequest:
+    type: object
+    required: [slug]
+    properties:
+      slug:
+        $ref: './common.yaml#/schemas/Slug'
+
+  SlugAvailability:
+    type: object
+    required: [slug, available]
+    properties:
+      slug:
+        $ref: './common.yaml#/schemas/Slug'
+      available:
+        type: boolean
+      reason:
+        type: string
+        nullable: true
+        description: '`slug_taken` либо `slug_reserved` (admin, api, employee, login и прочие служебные пути).'
+
+  UpdateProfileStatusRequest:
+    type: object
+    required: [status]
+    properties:
+      status:
+        type: string
+        enum: [PUBLISHED, BLOCKED]
+        description: Блокировка и разблокировка — операция ADMIN; публикация — владельца.

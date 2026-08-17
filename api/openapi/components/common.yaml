@@ -1,0 +1,321 @@
+# Общие компоненты: аутентификация, ошибки, пагинация, переиспользуемые параметры.
+# Файл — фрагмент, самостоятельным документом OpenAPI не является:
+# на него ссылаются через ./components/common.yaml#/<section>/<name>.
+
+securitySchemes:
+  bearerAuth:
+    type: http
+    scheme: bearer
+    bearerFormat: JWT
+    description: |
+      Access-токен, время жизни 15 минут. Содержит только `sub` (id пользователя)
+      и `sid` (id сессии) — роль и компания в токен НЕ кладутся и резолвятся
+      на каждом запросе, иначе отзыв прав вступал бы в силу с задержкой.
+
+      Тенант определяется самим ресурсом: `companyId` стоит в пути
+      у всех операций компании, профиль знает свою компанию сам.
+      Отдельного заголовка активного тенанта нет — он был бы вторым
+      источником истины и рано или поздно разошёлся бы с путём.
+
+  refreshCookie:
+    type: apiKey
+    in: cookie
+    name: vcard_refresh
+    description: |
+      Refresh-токен: httpOnly, Secure, SameSite=Lax, opaque-строка (не JWT).
+      Ротируется при каждом использовании, повторное предъявление уже
+      израсходованного токена гасит всю family сессий.
+      Используется единственной операцией — POST /auth/refresh.
+
+parameters:
+  CompanyId:
+    name: companyId
+    in: path
+    required: true
+    description: Идентификатор компании (тенанта).
+    schema:
+      $ref: '#/schemas/UUID'
+
+  ProfileId:
+    name: profileId
+    in: path
+    required: true
+    schema:
+      $ref: '#/schemas/UUID'
+
+  Slug:
+    name: slug
+    in: path
+    required: true
+    description: Адрес визитки из публичного URL.
+    schema:
+      $ref: '#/schemas/SlugLookup'
+
+  Limit:
+    name: limit
+    in: query
+    required: false
+    schema:
+      type: integer
+      format: int32
+      minimum: 1
+      maximum: 100
+      default: 20
+
+  Offset:
+    name: offset
+    in: query
+    required: false
+    schema:
+      type: integer
+      format: int32
+      minimum: 0
+      default: 0
+
+schemas:
+  UUID:
+    type: string
+    format: uuid
+    example: 018f3a2c-9c4e-7b3a-8f21-6d5b0c1a2e34
+
+  Email:
+    type: string
+    format: email
+    minLength: 6
+    maxLength: 254
+    pattern: '^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,63}$'
+    description: |
+      Регистр не значим, сравнение и уникальность — по нормализованному
+      значению (в БД `citext`).
+
+      Паттерн намеренно строже RFC 5322: требует TLD и не пропускает
+      `a@-b.com`, `a@b..com`, точку в конце домена. Взамен отсекает
+      экзотику, которая в реальной почте не встречается, — адреса
+      с кавычками в локальной части, IP-литералы (`a@[192.168.0.1]`)
+      и не-ASCII домены. Для приглашений это верный размен: адрес,
+      на который нельзя доставить письмо, бесполезен.
+    example: laura.hoffmann@acme.com
+
+  Timestamp:
+    type: string
+    format: date-time
+    example: '2026-08-16T09:41:00Z'
+
+  URL:
+    type: string
+    format: uri
+    maxLength: 2048
+
+  Password:
+    type: string
+    format: password
+    minLength: 8
+    maxLength: 128
+    description: |
+      Верхняя граница — защита от DoS на функции хеширования: без неё
+      мегабайтный «пароль» отнимает секунды CPU на каждой попытке входа.
+
+      Хешировать argon2id, не bcrypt: bcrypt молча обрезает вход на 72 байтах,
+      и при maxLength 128 часть пароля просто не участвовала бы в проверке.
+
+  # Nullable-двойники базовых типов.
+  # В OpenAPI 3.0 `nullable` действует только рядом с `type`, поэтому
+  # связка «$ref + nullable» молча не работает: сослаться на скалярный тип
+  # и тут же разрешить null нельзя. Отсюда явные варианты ниже — это цена
+  # версии 3.0, в 3.1 они не понадобились бы.
+  UUIDNullable:
+    type: string
+    format: uuid
+    nullable: true
+
+  URLNullable:
+    type: string
+    format: uri
+    maxLength: 2048
+    nullable: true
+
+  TimestampNullable:
+    type: string
+    format: date-time
+    nullable: true
+
+  Slug:
+    type: string
+    minLength: 3
+    maxLength: 64
+    pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+    description: |
+      Адрес визитки: domain.com/employee/{slug}. Пространство имён глобальное
+      (в URL нет компании), поэтому уникальность — по всей системе.
+      Блокировка страницы слаг НЕ освобождает.
+    example: laura-hoffmann
+
+  SlugLookup:
+    type: string
+    minLength: 3
+    maxLength: 64
+    pattern: '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$'
+    description: |
+      Адрес визитки, каким он пришёл из URL.
+
+      Регистр здесь допускается, хотя выдаём мы всегда нижний: ссылку
+      набирают с визитки руками, копируют из письма, где клиент мог
+      поменять регистр. Слаг в базе — citext, поиск и так регистронезависим,
+      и отвечать на `/employee/Laura` ошибкой валидации было бы
+      беспричинной грубостью.
+
+      Строгое правило (только нижний регистр) остаётся у `Slug` — оно
+      применяется там, где адрес ЗАДАЁТСЯ, а не разбирается.
+    example: Laura-Hoffmann
+
+  SlugNullable:
+    type: string
+    minLength: 3
+    maxLength: 64
+    pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+    nullable: true
+
+  # --- ошибки -------------------------------------------------------------
+
+  Error:
+    type: object
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        description: |
+          Машиночитаемый код для ветвления на клиенте. Намеренно НЕ enum:
+          закрытый список сделал бы добавление нового кода ломающим изменением
+          для уже выкаченных клиентов. Известные значения:
+
+          * `validation_failed`   — см. `fields`
+          * `unauthenticated`     — токен отсутствует, истёк или отозван
+          * `forbidden`           — роли в этой компании недостаточно
+          * `not_found`
+          * `slug_taken`          — адрес визитки занят (в т.ч. заблокированным профилем)
+          * `slug_reserved`       — адрес в списке зарезервированных
+          * `email_mismatch`      — приглашение выписано на другой адрес
+          * `invitation_expired`
+          * `invitation_used`
+          * `already_member`
+          * `last_admin`          — нельзя разжаловать или удалить последнего админа
+          * `rate_limited`
+        example: slug_taken
+      message:
+        type: string
+        description: Человекочитаемое пояснение. Для пользователя не предназначено — текст локализует фронт по `code`.
+        example: slug "laura-hoffmann" is already taken
+      fields:
+        type: array
+        description: Заполняется только при `validation_failed`.
+        items:
+          $ref: '#/schemas/FieldError'
+      requestId:
+        type: string
+        description: Совпадает с заголовком `X-Request-Id`; по нему находится запрос в логах.
+
+  FieldError:
+    type: object
+    required: [field, code]
+    properties:
+      field:
+        type: string
+        description: Путь в теле запроса в точечной нотации.
+        example: customTags.1
+      code:
+        type: string
+        example: too_long
+      message:
+        type: string
+
+  PageInfo:
+    type: object
+    required: [total, limit, offset]
+    properties:
+      total:
+        type: integer
+        format: int64
+      limit:
+        type: integer
+        format: int32
+      offset:
+        type: integer
+        format: int32
+
+responses:
+  BadRequest:
+    description: Тело запроса не разобрано или нарушены ограничения схемы.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  Unauthorized:
+    description: Access-токен отсутствует, истёк или отозван.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  Forbidden:
+    description: Пользователь аутентифицирован, но роли в этой компании недостаточно.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  NotFound:
+    description: |
+      Ресурс не найден либо не принадлежит текущему тенанту — эти два случая
+      намеренно неразличимы, иначе по кодам ответов перебираются чужие id.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  Conflict:
+    description: Конфликт состояния (занятый слаг, повторное приглашение, последний админ).
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  Unexpected:
+    description: |
+      Непредвиденная ошибка. Присутствует у каждой операции не для красоты:
+      ogen генерирует хук `NewError` только когда `default` объявлен везде,
+      а без него любая паника или незамапленная ошибка уходит клиенту
+      голым 500 без тела, и фронт не может её отличить от сетевого сбоя.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  PayloadTooLarge:
+    description: Файл превышает допустимый размер.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  UnsupportedMediaType:
+    description: |
+      Тип файла не поддерживается. Проверяется по сигнатуре содержимого,
+      а не по заголовку `Content-Type` и не по расширению — и то и другое
+      задаёт клиент.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'
+
+  TooManyRequests:
+    description: Превышен лимит запросов.
+    headers:
+      Retry-After:
+        schema:
+          type: integer
+        description: Через сколько секунд повторять.
+    content:
+      application/json:
+        schema:
+          $ref: '#/schemas/Error'

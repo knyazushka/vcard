@@ -1,0 +1,347 @@
+# Профиль сотрудника — приватная сторона.
+#
+# Доступ: владелец профиля либо ADMIN его компании. Компания в пути не нужна,
+# профиль знает её сам.
+#
+# «Минимальная роль Сотрудник» из ТЗ выражена структурно: профиль существует
+# только вместе с членством, поэтому и редактирование, и карточка доступны
+# ровно тем, у кого роль есть.
+
+Item:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  get:
+    tags: [profiles]
+    operationId: getProfile
+    summary: Профиль целиком
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Профиль.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Profile'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+  patch:
+    tags: [profiles]
+    operationId: updateProfile
+    summary: Изменить профиль
+    description: |
+      Владелец либо ADMIN компании — второе прямо требует ТЗ
+      («администратор может редактировать странички пользователей»).
+
+      Правила, которых нет в схеме и которые проверяются здесь:
+      должность задаётся либо ссылкой на справочник, либо своим текстом,
+      но не одновременно; тегов суммарно не больше трёх; пользовательский
+      тег нормализуется, чтобы не плодить дубли в разном регистре.
+
+      `aboutHtml` принимается сырым из редактора и санитизируется
+      на записи по allowlist — в ответе уже очищенный вариант. Именно
+      на записи, а не на чтении: иначе обновление санитайзера молча
+      меняет то, как выглядят давно сохранённые страницы.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/profile.yaml#/schemas/UpdateProfileRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Обновлённый профиль.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Profile'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '422':
+        description: |
+          Нарушено доменное правило — должность задана двумя способами сразу,
+          тегов больше трёх, тег из чужой компании.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+Avatar:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  put:
+    tags: [profiles]
+    operationId: uploadAvatar
+    summary: Загрузить фотографию
+    description: |
+      PNG, JPEG или WebP, не больше 5 МБ. Тип проверяется по сигнатуре файла.
+
+      Кроп передаётся отдельными полями и сохраняется метаданными —
+      в файл он не выжигается. Исходник остаётся целым, и кроп можно
+      переиграть, не заставляя человека загружать фотографию заново.
+      Круг рисуется маской при рендере: в самой картинке его нет,
+      иначе PNG-карточка на непрозрачном фоне получила бы чёрные углы.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [file]
+            properties:
+              file:
+                type: string
+                format: binary
+              cropX:
+                type: integer
+                minimum: 0
+              cropY:
+                type: integer
+                minimum: 0
+              cropSize:
+                type: integer
+                minimum: 1
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Фотография загружена.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Avatar'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '413':
+        $ref: '../components/common.yaml#/responses/PayloadTooLarge'
+      '415':
+        $ref: '../components/common.yaml#/responses/UnsupportedMediaType'
+  delete:
+    tags: [profiles]
+    operationId: deleteAvatar
+    summary: Удалить фотографию
+    description: Идемпотентна.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '204':
+        description: Фотографии больше нет.
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+
+AvatarCrop:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  put:
+    tags: [profiles]
+    operationId: updateAvatarCrop
+    summary: Изменить область кадрирования
+    description: Меняет только метаданные — файл не перезаливается.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/profile.yaml#/schemas/Crop'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Кроп обновлён.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Avatar'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '422':
+        description: Область выходит за границы изображения.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+Slug:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  put:
+    tags: [profiles]
+    operationId: updateProfileSlug
+    summary: Сменить адрес визитки
+    description: |
+      Пункт ТЗ: адрес выдаётся автоматически из части почты до `@`,
+      но его можно поменять на любой свободный.
+
+      Занятость проверяется вставкой с обработкой конфликта, а не
+      предварительным SELECT: между проверкой и записью успевает
+      вклиниться другой запрос, и «свободный» адрес оказывается занят.
+
+      Прежний адрес освобождается и может быть занят кем угодно —
+      в отличие от блокировки, где слаг удерживается.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/profile.yaml#/schemas/UpdateSlugRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Адрес изменён.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Profile'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '409':
+        description: Адрес занят (`slug_taken`) или зарезервирован (`slug_reserved`).
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+SlugAvailability:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/Slug'
+  get:
+    tags: [profiles]
+    operationId: checkSlugAvailability
+    summary: Свободен ли адрес
+    description: |
+      Подсказка для формы. Требует аутентификации и ограничена по частоте:
+      анонимный доступ превратил бы её в перебиратель занятых адресов,
+      то есть в список всех визиток системы.
+
+      Ответ носит рекомендательный характер — окончательное решение
+      принимает PUT, потому что между проверкой и сохранением адрес
+      может занять кто-то другой.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Результат проверки.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/SlugAvailability'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+Status:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  put:
+    tags: [profiles]
+    operationId: updateProfileStatus
+    summary: Опубликовать или заблокировать
+    description: |
+      Две разные операции под одним ресурсом, и роли у них разные:
+
+      * `PUBLISHED` от владельца — публикация. Требует заполненного имени
+        и ровно трёх тегов; черновик с двумя тегами опубликовать нельзя.
+      * `BLOCKED` и снятие блокировки — только ADMIN компании. По ТЗ
+        заблокированная страница показывает заглушку, а адрес остаётся
+        занятым: снять его и отдать другому нельзя.
+
+      Владелец разблокировать себя не может — иначе блокировка
+      не была бы блокировкой.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../components/profile.yaml#/schemas/UpdateProfileStatusRequest'
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Статус изменён.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/Profile'
+      '400':
+        $ref: '../components/common.yaml#/responses/BadRequest'
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '422':
+        description: Профиль не готов к публикации — нет имени или тегов меньше трёх.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+
+Card:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/ProfileId'
+  get:
+    tags: [profiles]
+    operationId: getOwnProfileCard
+    summary: Карточка своего профиля, PNG
+    description: |
+      То же изображение, что и на публичном маршруте, но работает
+      и для черновика: человек должен увидеть, что скачает, до того
+      как опубликует страницу.
+
+      Публичный `/public/employee/{slug}/card.png` для DRAFT отдаёт 404,
+      поэтому предпросмотр без этого маршрута был бы невозможен.
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Изображение карточки.
+        content:
+          image/png:
+            schema:
+              type: string
+              format: binary
+      '401':
+        $ref: '../components/common.yaml#/responses/Unauthorized'
+      '403':
+        $ref: '../components/common.yaml#/responses/Forbidden'
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'

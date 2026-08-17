@@ -1,0 +1,122 @@
+# Приглашения — единственный способ попасть в компанию.
+#
+# В компанию нельзя «выбрать вход»: если бы пользователь сам выбирал компанию
+# из общего списка, чужой человек оказался бы под чужим брендом, а его админ —
+# с посторонним в панели. Поэтому вступление всегда инициирует ADMIN.
+
+schemas:
+  InvitationStatus:
+    type: string
+    enum: [PENDING, ACCEPTED, REVOKED, EXPIRED]
+    description: |
+      EXPIRED не выставляется фоновой задачей, а вычисляется при чтении
+      (`expires_at < now()`) — иначе состояние зависит от того, жив ли воркер.
+
+  Invitation:
+    type: object
+    required: [id, email, role, status, expiresAt, createdAt]
+    description: Представление для админки. Сам токен здесь не отдаётся никогда — он существует только в письме.
+    properties:
+      id:
+        $ref: './common.yaml#/schemas/UUID'
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      role:
+        $ref: './auth.yaml#/schemas/Role'
+      status:
+        $ref: '#/schemas/InvitationStatus'
+      expiresAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+      createdAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+      invitedByEmail:
+        $ref: './common.yaml#/schemas/Email'
+      acceptedAt:
+        $ref: './common.yaml#/schemas/TimestampNullable'
+      lastSentAt:
+        type: string
+        format: date-time
+        nullable: true
+        description: Письмо уходит асинхронно через outbox, поэтому «создано» и «отправлено» — разные моменты.
+
+  CreateInvitationRequest:
+    type: object
+    required: [email]
+    properties:
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      role:
+        allOf:
+          - $ref: './auth.yaml#/schemas/Role'
+        default: EMPLOYEE
+        description: ADMIN допустим — иначе компания навсегда завязана на одного человека.
+
+  InvitationList:
+    type: object
+    required: [items, page]
+    properties:
+      items:
+        type: array
+        items:
+          $ref: '#/schemas/Invitation'
+      page:
+        $ref: './common.yaml#/schemas/PageInfo'
+
+  InvitationPreview:
+    type: object
+    required: [companyName, email, role, expiresAt, requiresRegistration]
+    description: |
+      Отдаётся по токену без аутентификации — токен здесь и есть секрет
+      (32 байта из crypto/rand; в БД лежит только его sha256).
+      Нужен, чтобы Next отрендерил на SSR страницу «Вас пригласили в Acme»,
+      а не пустой спиннер.
+    properties:
+      companyName:
+        type: string
+      companyLogoUrl:
+        $ref: './common.yaml#/schemas/URLNullable'
+      email:
+        $ref: './common.yaml#/schemas/Email'
+      role:
+        $ref: './auth.yaml#/schemas/Role'
+      expiresAt:
+        $ref: './common.yaml#/schemas/Timestamp'
+      requiresRegistration:
+        type: boolean
+        description: |
+          true — учётки с этим адресом ещё нет, фронт показывает форму пароля.
+          false — достаточно войти существующей.
+
+  AcceptInvitationRequest:
+    type: object
+    description: |
+      Адрес приглашения не передаётся и не редактируется: принять приглашение
+      может только владелец того самого ящика. Токена самого по себе мало —
+      письма пересылают, а несовпадение даёт `email_mismatch`.
+    properties:
+      password:
+        allOf:
+          - $ref: './common.yaml#/schemas/Password'
+        description: |
+          Обязателен ровно тогда, когда `requiresRegistration = true`:
+          регистрация, членство и черновик профиля создаются одной транзакцией.
+          Если учётка уже есть — поле игнорируется, требуется валидный access-токен.
+
+  AcceptInvitationResponse:
+    type: object
+    required: [companyId, role, profileId]
+    properties:
+      companyId:
+        $ref: './common.yaml#/schemas/UUID'
+      role:
+        $ref: './auth.yaml#/schemas/Role'
+      profileId:
+        $ref: './common.yaml#/schemas/UUID'
+      profileSlug:
+        $ref: './common.yaml#/schemas/Slug'
+      accessToken:
+        type: object
+        nullable: true
+        allOf:
+          - $ref: './auth.yaml#/schemas/AccessToken'
+        description: Приходит только в ветке регистрации — вместе с refresh-cookie. При приёме уже вошедшим пользователем равен null.

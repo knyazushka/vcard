@@ -1,0 +1,47 @@
+# Окружение для локальной разработки.
+#
+# Здесь ровно те же backing services, что в проде, — это фактор X (dev/prod
+# parity) не на словах: тесты идут против настоящего Postgres, а письма
+# по-настоящему отправляются, просто оседают в Mailpit. Подменять Postgres
+# на SQLite в тестах нельзя: половина схемы (citext, генерируемые столбцы,
+# частичные уникальные индексы, constraint-триггеры) там не существует.
+
+services:
+  postgres:
+    # Версия закреплена до минорной. Плавающий тег 18-alpine однажды уже
+    # подтянул образ со сменившейся точкой монтирования, и окружение
+    # перестало подниматься на ровном месте — воспроизводимость среды
+    # это тоже часть фактора X.
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_USER: vcard
+      POSTGRES_PASSWORD: vcard
+      POSTGRES_DB: vcard
+    ports:
+      # 5432 на хосте обычно занят локально установленным Postgres, и тогда
+      # клиент молча уходит не в тот сервер. Разводим порты, чтобы окружение
+      # проекта нельзя было перепутать с чужой базой.
+      - "5433:5432"
+    volumes:
+      # Начиная с 18 образ хранит данные в подкаталоге с номером версии
+      # (/var/lib/postgresql/18/docker) — чтобы pg_upgrade мог работать
+      # без пересечения границ монтирования. Поэтому том цепляем к родителю,
+      # а не к .../data, как было принято в 17 и раньше.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vcard -d vcard"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # веб-интерфейс с пойманными письмами
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  pgdata:

@@ -1,0 +1,156 @@
+# Публичная часть: страница визитки и её PNG/SVG.
+# Аутентификации нет ни у одной операции — security: [] перекрывает
+# глобальное значение из openapi.yaml.
+#
+# Путь намеренно повторяет адрес страницы из ТЗ (domain.com/employee/{URL}),
+# чтобы маршрут фронта и маршрут API отображались друг в друга один в один.
+
+Profile:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/Slug'
+  get:
+    tags: [public]
+    operationId: getPublicProfile
+    summary: Визитка по адресу
+    description: |
+      Заблокированная страница отвечает 200 со `status: BLOCKED` и `profile: null`,
+      а не 404 — иначе Next покажет страницу ошибки вместо заглушки, и ссылка,
+      которую уже разослали, начнёт выглядеть битой. Слаг при этом остаётся занятым.
+
+      Неопубликованный (DRAFT) и архивный профиль дают 404: их вообще не должно
+      быть видно снаружи.
+    security: []
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Опубликованная либо заблокированная страница.
+        headers:
+          ETag:
+            $ref: '#/x-headers/ETag'
+          Cache-Control:
+            $ref: '#/x-headers/CacheControlPublic'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/profile.yaml#/schemas/PublicProfileResponse'
+      '304':
+        description: Не изменилось с момента, указанного в `If-None-Match`.
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+CardPng:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/Slug'
+  get:
+    tags: [public]
+    operationId: getProfileCardPng
+    summary: Карточка визитки, PNG
+    description: |
+      Готовый к скачиванию файл. PNG, а не JPEG: на карточке текст, логотип
+      и плоские заливки — JPEG даёт звон вокруг букв.
+
+      Генерируется синхронно при первом обращении и кладётся в хранилище
+      под именем `hash(данные профиля + версия рендерера)`. Поэтому правка
+      профиля меняет URL сама, а изменение макета в коде разом обесценивает
+      все старые файлы — ручная инвалидация не нужна.
+
+      Единственная CPU-тяжёлая операция в системе и при этом публичная,
+      поэтому лимит запросов здесь строже остальных.
+    security: []
+    parameters:
+      - name: download
+        in: query
+        required: false
+        description: 'С `true` ответ получает `Content-Disposition: attachment`.'
+        schema:
+          type: boolean
+          default: false
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Изображение карточки.
+        headers:
+          ETag:
+            $ref: '#/x-headers/ETag'
+          Cache-Control:
+            $ref: '#/x-headers/CacheControlPublic'
+          Content-Disposition:
+            schema:
+              type: string
+            description: Присутствует только при `download=true`.
+        content:
+          image/png:
+            schema:
+              type: string
+              format: binary
+      '304':
+        description: Не изменилось с момента, указанного в `If-None-Match`.
+      '404':
+        description: |
+          Профиль не найден, не опубликован или заблокирован. Для заблокированного
+          именно 404, а не заглушка: картинка не должна расходиться по мессенджерам
+          после блокировки.
+        content:
+          application/json:
+            schema:
+              $ref: '../components/common.yaml#/schemas/Error'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+CardSvg:
+  parameters:
+    - $ref: '../components/common.yaml#/parameters/Slug'
+  get:
+    tags: [public]
+    operationId: getProfileCardSvg
+    summary: Карточка визитки, SVG
+    description: |
+      Тот же макет, из которого растеризуется PNG, — не второе представление,
+      а исходник первого. Нужен фронту для живого превью: Next встраивает SVG
+      прямо в DOM (не через `<img>`, иначе внешние шрифты и аватар не загрузятся),
+      и React не дублирует вёрстку карточки у себя.
+
+      Как файл для скачивания не годится и для этого не предназначен:
+      мессенджеры и почтовые клиенты SVG в превью не рендерят.
+    security: []
+    responses:
+      default:
+        $ref: '../components/common.yaml#/responses/Unexpected'
+      '200':
+        description: Макет карточки.
+        headers:
+          ETag:
+            $ref: '#/x-headers/ETag'
+          Cache-Control:
+            $ref: '#/x-headers/CacheControlPublic'
+        content:
+          image/svg+xml:
+            schema:
+              type: string
+      '304':
+        description: Не изменилось с момента, указанного в `If-None-Match`.
+      '404':
+        $ref: '../components/common.yaml#/responses/NotFound'
+      '429':
+        $ref: '../components/common.yaml#/responses/TooManyRequests'
+
+# Локальные определения заголовков. Ключ начинается с x-, чтобы не попасть
+# в разбор как элемент Path Item Object.
+x-headers:
+  ETag:
+    schema:
+      type: string
+    description: Хэш содержимого; клиент возвращает его в `If-None-Match`.
+  CacheControlPublic:
+    schema:
+      type: string
+    description: '`public, max-age=60, stale-while-revalidate=300` — страница может измениться в любой момент.'
+  # Долгого immutable-кэша здесь быть не может: путь стабилен, а содержимое
+  # меняется при каждой правке профиля. Вечно кэшируемый адрес — это
+  # `cardImageUrl` из ответа профиля: он ведёт прямо в хранилище и содержит
+  # хэш в имени файла. Этот же маршрут — удобная точка входа «по слагу»,
+  # он отдаёт актуальную версию и валидируется по ETag.

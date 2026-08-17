@@ -1,0 +1,128 @@
+openapi: 3.0.3
+
+info:
+  title: vcard API
+  version: 0.1.0
+  description: |
+    Виртуальная визитка сотрудника.
+
+    Модель тенантная: компания — единица изоляции, глобального администратора
+    нет. Попасть в компанию можно только по приглашению её админа; создать
+    компанию может любой зарегистрированный пользователь и становится её
+    администратором.
+
+    Публичная часть (`/public/**`) отдаётся без аутентификации и использует
+    отдельные схемы: приватные поля в неё не попадают по построению, а не
+    за счёт зануления.
+
+    Спека — источник истины: сервер генерируется ogen, клиент фронта —
+    openapi-typescript. Рассинхрон ловится компилятором, а не тестировщиком.
+  license:
+    name: MIT
+    url: https://github.com/knyazushka/vcard/blob/main/LICENSE
+
+servers:
+  - url: https://api.vcard.example/api/v1
+    description: production
+  - url: http://localhost:8080/api/v1
+    description: local
+
+tags:
+  - name: auth
+    description: Регистрация, вход, ротация токенов.
+  - name: companies
+    description: Компании-тенанты и их справочники.
+  - name: invitations
+    description: Приглашения в компанию.
+  - name: profiles
+    description: Профили сотрудников.
+  - name: public
+    description: |
+      Страница визитки и карточка — без аутентификации.
+      Пробы (`/healthz`, `/readyz`) и метрики Prometheus в спеке не описаны:
+      они живут вне версионированного префикса и относятся к инфраструктуре,
+      а не к контракту с фронтом.
+
+# Значение по умолчанию: требуется access-токен.
+# Публичные операции перекрывают его пустым списком `security: []`.
+security:
+  - bearerAuth: []
+
+paths:
+
+  # --- публичное, без аутентификации --------------------------------------
+  /public/employee/{slug}:
+    $ref: './paths/public.yaml#/Profile'
+  /public/employee/{slug}/card.png:
+    $ref: './paths/public.yaml#/CardPng'
+  /public/employee/{slug}/card.svg:
+    $ref: './paths/public.yaml#/CardSvg'
+
+  # --- аутентификация ------------------------------------------------------
+  /auth/register:
+    $ref: './paths/auth.yaml#/Register'
+  /auth/login:
+    $ref: './paths/auth.yaml#/Login'
+  /auth/refresh:
+    $ref: './paths/auth.yaml#/Refresh'
+  /auth/logout:
+    $ref: './paths/auth.yaml#/Logout'
+  /auth/logout-all:
+    $ref: './paths/auth.yaml#/LogoutAll'
+  /auth/me:
+    $ref: './paths/auth.yaml#/Me'
+
+  # --- компании и справочники ----------------------------------------------
+  /companies:
+    $ref: './paths/companies.yaml#/Collection'
+  /companies/{companyId}:
+    $ref: './paths/companies.yaml#/Item'
+  /companies/{companyId}/logo:
+    $ref: './paths/companies.yaml#/Logo'
+  /companies/{companyId}/positions:
+    $ref: './paths/companies.yaml#/Positions'
+  /companies/{companyId}/positions/{positionId}:
+    $ref: './paths/companies.yaml#/PositionItem'
+  /companies/{companyId}/tags:
+    $ref: './paths/companies.yaml#/Tags'
+  /companies/{companyId}/tags/{tagId}:
+    $ref: './paths/companies.yaml#/TagItem'
+  /companies/{companyId}/employees:
+    $ref: './paths/companies.yaml#/Employees'
+  /companies/{companyId}/employees/{userId}:
+    $ref: './paths/companies.yaml#/EmployeeItem'
+
+  # --- приглашения ---------------------------------------------------------
+  /companies/{companyId}/invitations:
+    $ref: './paths/invitations.yaml#/Collection'
+  /companies/{companyId}/invitations/{invitationId}:
+    $ref: './paths/invitations.yaml#/Item'
+  /companies/{companyId}/invitations/{invitationId}/resend:
+    $ref: './paths/invitations.yaml#/Resend'
+  /invitations/{token}:
+    $ref: './paths/invitations.yaml#/Preview'
+  /invitations/{token}/accept:
+    $ref: './paths/invitations.yaml#/Accept'
+
+  # --- профили -------------------------------------------------------------
+  /profiles/{profileId}:
+    $ref: './paths/profiles.yaml#/Item'
+  /profiles/{profileId}/avatar:
+    $ref: './paths/profiles.yaml#/Avatar'
+  /profiles/{profileId}/avatar/crop:
+    $ref: './paths/profiles.yaml#/AvatarCrop'
+  /profiles/{profileId}/slug:
+    $ref: './paths/profiles.yaml#/Slug'
+  /profiles/{profileId}/status:
+    $ref: './paths/profiles.yaml#/Status'
+  /profiles/{profileId}/card.png:
+    $ref: './paths/profiles.yaml#/Card'
+  /slugs/{slug}/availability:
+    $ref: './paths/profiles.yaml#/SlugAvailability'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: './components/common.yaml#/securitySchemes/bearerAuth'
+    refreshCookie:
+      $ref: './components/common.yaml#/securitySchemes/refreshCookie'
