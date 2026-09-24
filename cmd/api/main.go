@@ -25,6 +25,7 @@ import (
 	"github.com/knyazushka/vcard/internal/render"
 	postgresrepo "github.com/knyazushka/vcard/internal/repository/postgres"
 	"github.com/knyazushka/vcard/internal/service/auth"
+	"github.com/knyazushka/vcard/internal/service/avatar"
 	"github.com/knyazushka/vcard/internal/service/card"
 	"github.com/knyazushka/vcard/internal/service/company"
 	"github.com/knyazushka/vcard/internal/service/invitation"
@@ -91,6 +92,9 @@ func run() error {
 		return fmt.Errorf("init card renderer: %w", err)
 	}
 	cardService := card.NewService(postgresrepo.NewProfileRepo(pool), files, cardRenderer)
+	// Нарезка аватара по кропу для публичной страницы: без неё карточка
+	// и страница показывают одно лицо по-разному.
+	avatarService := avatar.NewService(files)
 
 	renderer, err := email.NewRenderer()
 	if err != nil {
@@ -109,6 +113,7 @@ func run() error {
 		Invitations:   invitationService,
 		Profiles:      profileService,
 		Cards:         cardService,
+		Avatars:       avatarService,
 		Files:         files,
 		Limits:        apihttp.Limits{Avatar: cfg.Storage.MaxAvatarBytes, Logo: cfg.Storage.MaxLogoBytes},
 		Log:           log,

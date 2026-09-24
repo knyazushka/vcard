@@ -1,4 +1,4 @@
-.PHONY: api-lint api-bundle api-gen api-check build test \
+.PHONY: api-lint api-bundle api-gen api-check build test run \
         db-up db-down migrate-up migrate-down migrate-status migrate-verify
 
 SPEC_DIR := api/openapi
@@ -33,6 +33,17 @@ build:
 
 test:
 	go test ./...
+
+# Запуск для разработки.
+#
+# Конфигурация читается только из окружения (фактор III), и загрузчика .env
+# в приложении нет намеренно: в проде переменные ставит среда исполнения,
+# а лишняя зависимость ради удобства разработки живёт бы в проде тоже.
+# Поэтому .env экспортирует make, а не процесс: файл остаётся удобством
+# оболочки, приложение по-прежнему знает только про окружение.
+run:
+	@test -f .env || { echo "нет .env — скопируйте .env.example"; exit 1; }
+	set -a; . ./.env; set +a; go run ./cmd/api
 
 # Сгенерированный ogen код из проверки исключён: правится он только
 # перегенерацией, а замечания к нему всё равно некому адресовать.

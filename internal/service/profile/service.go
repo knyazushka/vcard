@@ -56,28 +56,41 @@ type access struct {
 // требует ТЗ («администратор может редактировать странички пользователей»).
 // Посторонний получает ErrNotFound, а не ErrForbidden: иначе по кодам
 // ответов перебираются идентификаторы чужих визиток.
+//
+// Роли складываются, а не исключают друг друга. Раньше владелец получал
+// доступ сразу, не доходя до проверки членства, — и у администратора,
+// открывшего собственную визитку, admin оставался false. Из-за этого
+// основатель компании-одиночки мог опубликовать свою страницу и не мог
+// её скрыть: Block требует admin, а взять его было неоткуда.
 func (s *Service) authorize(ctx context.Context, profileID, userID uuid.UUID) (access, error) {
 	p, err := s.repo.ByID(ctx, profileID)
 	if err != nil {
 		return access{}, err
 	}
 
-	if p.UserID == userID {
-		return access{profile: p, owner: true}, nil
-	}
+	owner := p.UserID == userID
 
+	admin := false
 	role, err := s.companies.Membership(ctx, p.CompanyID, userID)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+	switch {
+	case err == nil:
+		admin = role == domain.RoleAdmin
+	case errors.Is(err, domain.ErrNotFound):
+		// Членства нет. Для владельца это нормально: исключённый сотрудник
+		// сохраняет доступ к своей архивной визитке. Для всех остальных —
+		// повод не признавать её существование.
+		if !owner {
 			return access{}, domain.ErrNotFound
 		}
+	default:
 		return access{}, err
 	}
-	if role != domain.RoleAdmin {
+
+	if !owner && !admin {
 		return access{}, domain.ErrNotFound
 	}
 
-	return access{profile: p, admin: true}, nil
+	return access{profile: p, owner: owner, admin: admin}, nil
 }
 
 // Get отдаёт визитку владельцу или администратору компании.

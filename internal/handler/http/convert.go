@@ -234,7 +234,11 @@ func (a *API) avatar(p domain.Profile) *openapi.Avatar {
 // Отдельный тип, а не Profile с занулением: здесь нет ни идентификаторов,
 // ни компании-владельца, ни служебных полей, и следующее поле, добавленное
 // в Profile, физически не может сюда просочиться.
-func (a *API) publicProfile(p domain.Profile) openapi.ProfilePublic {
+// avatarKey приходит извне, а не берётся из профиля: для публичной
+// страницы это НАРЕЗАННЫЙ по кропу файл, и решение о его подготовке
+// принимает обработчик — здесь только сборка ответа, без обращений
+// к хранилищу.
+func (a *API) publicProfile(p domain.Profile, avatarKey string) openapi.ProfilePublic {
 	titles := make([]string, 0, len(p.Tags))
 	for _, t := range p.Tags {
 		titles = append(titles, t.Title)
@@ -243,7 +247,7 @@ func (a *API) publicProfile(p domain.Profile) openapi.ProfilePublic {
 	out := openapi.ProfilePublic{
 		Slug:          openapi.Slug(p.Slug),
 		FullName:      optNilString(p.FullName),
-		AvatarUrl:     optNilURL(a.files.URL(p.AvatarKey)),
+		AvatarUrl:     optNilURL(a.files.URL(avatarKey)),
 		PositionTitle: optNilString(p.Position.Title),
 		AboutHtml:     optNilString(p.AboutHTML),
 		Tags:          titles,

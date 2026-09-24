@@ -289,8 +289,11 @@ func (a *API) GetPublicProfile(ctx context.Context, params openapi.GetPublicProf
 		CacheControl: openapi.NewOptString(publicCacheControl),
 		ETag:         openapi.NewOptString(profileETag(p)),
 		Response: openapi.PublicProfileResponse{
-			Status:  openapi.PublicProfileResponseStatusPUBLISHED,
-			Profile: openapi.NewOptNilProfilePublic(a.publicProfile(p)),
+			Status: openapi.PublicProfileResponseStatusPUBLISHED,
+			// Нарезка ленивая и кэшируется по хэшу: платит первый запрос
+			// после смены фотографии или кропа, остальные читают готовое.
+			Profile: openapi.NewOptNilProfilePublic(
+				a.publicProfile(p, a.avatars.CroppedKey(ctx, p))),
 		},
 	}, nil
 }

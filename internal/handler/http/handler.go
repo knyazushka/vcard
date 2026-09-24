@@ -13,6 +13,7 @@ import (
 
 	"github.com/knyazushka/vcard/internal/gen/openapi"
 	"github.com/knyazushka/vcard/internal/service/auth"
+	avatarsvc "github.com/knyazushka/vcard/internal/service/avatar"
 	cardsvc "github.com/knyazushka/vcard/internal/service/card"
 	"github.com/knyazushka/vcard/internal/service/company"
 	invitesvc "github.com/knyazushka/vcard/internal/service/invitation"
@@ -41,6 +42,7 @@ type API struct {
 	invitations *invitesvc.Service
 	profiles    *profilesvc.Service
 	cards       *cardsvc.Service
+	avatars     *avatarsvc.Service
 	files       storage.BlobStore
 	limits      Limits
 	log         *slog.Logger
@@ -58,6 +60,7 @@ type Deps struct {
 	Invitations *invitesvc.Service
 	Profiles    *profilesvc.Service
 	Cards       *cardsvc.Service
+	Avatars     *avatarsvc.Service
 	Files       storage.BlobStore
 	Limits      Limits
 	Log         *slog.Logger
@@ -73,6 +76,7 @@ func NewAPI(d Deps) *API {
 		invitations:   d.Invitations,
 		profiles:      d.Profiles,
 		cards:         d.Cards,
+		avatars:       d.Avatars,
 		files:         d.Files,
 		limits:        d.Limits,
 		log:           d.Log,

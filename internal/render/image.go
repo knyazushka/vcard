@@ -169,3 +169,34 @@ func PrepareLogo(src image.Image) image.Image {
 
 	return out
 }
+
+// avatarWebPixels — сторона обрезанного аватара для веб-страницы.
+//
+// Вдвое больше того, в чём он показывается (112 CSS-пикселей), чтобы
+// не мылился на экранах удвоенной плотности. Больше не берём: исходник
+// часто и сам меньше, а растягивать фотографию ради запаса бессмысленно.
+const avatarWebPixels = 256
+
+// CropAvatar вырезает область кадрирования и приводит её к квадрату.
+//
+// От PrepareAvatar отличается тем, чего здесь НЕТ: круглой маски
+// и непрозрачного фона. Карточке они нужны — она растр и кладётся
+// на белое поле; веб-странице нет, там круг рисует CSS, и вшитый
+// в пиксели фон вылез бы светлым кольцом на тёмной теме.
+func CropAvatar(src image.Image, crop *domain.Crop) image.Image {
+	if src == nil {
+		return nil
+	}
+
+	src = applyCrop(src, crop)
+
+	// Апскейл бессмысленен: он не добавляет деталей, зато утяжеляет файл.
+	side := min(avatarWebPixels, src.Bounds().Dx())
+	if side <= 0 {
+		return nil
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, side, side))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)
+	return dst
+}
