@@ -1,0 +1,14 @@
+# Prometheus ходит к api по внутренней сети compose: порт 9090 наружу
+# не опубликован, и метрики никому, кроме него, не видны.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: vcard-api
+    static_configs:
+      - targets: ["api:9090"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

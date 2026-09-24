@@ -1,5 +1,6 @@
 .PHONY: api-lint api-bundle api-gen api-check build test run \
-        db-up db-down migrate-up migrate-down migrate-status migrate-verify
+        db-up db-down migrate-up migrate-down migrate-status migrate-verify \
+        stand-up stand-smoke stand-down
 
 SPEC_DIR := api/openapi
 BUNDLE   := $(SPEC_DIR)/openapi.bundled.yaml
@@ -79,3 +80,16 @@ migrate-verify:
 	go tool goose -dir migrations postgres "$(DB_DSN)" up
 	go tool goose -dir migrations postgres "$(DB_DSN)" reset
 	go tool goose -dir migrations postgres "$(DB_DSN)" up
+
+# --- локальный прод-стенд ----------------------------------------------------
+# Тот же deploy/compose.yaml, что на сервере, с контейнерами вместо
+# управляемых сервисов. Подробности — docs/operations.md.
+
+stand-up:
+	sh deploy/local/up.sh
+
+stand-smoke:
+	bash deploy/local/smoke.sh
+
+stand-down:
+	sh deploy/local/down.sh

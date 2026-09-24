@@ -110,11 +110,14 @@ func (o *Outbox) deliver(ctx context.Context, item postgres.OutboxItem) {
 		// получать одинаковый поток попыток каждые несколько секунд.
 		backoff := time.Duration(1<<min(item.Attempts, 8)) * time.Second
 
+		sendFailures.Inc()
 		o.log.Warn("email delivery failed",
 			"id", item.ID, "attempt", item.Attempts, "retry_in", backoff, "error", err)
 		o.fail(ctx, item.ID, err.Error(), backoff, maxAttempts)
 		return
 	}
+
+	emailsSent.Inc()
 
 	if err := o.queue.MarkSent(ctx, item.ID); err != nil {
 		// Письмо ушло, а отметка не встала — при следующем тике оно уйдёт

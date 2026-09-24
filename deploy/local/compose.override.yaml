@@ -1,0 +1,51 @@
+# Локальный прод-стенд: deploy/compose.yaml как есть, а вместо управляемых
+# сервисов Timeweb — контейнеры. Подключается скриптом up.sh, руками
+# этот файл не используют.
+#
+# Порты сдвинуты, чтобы стенд уживался с окружением разработки:
+# 3000 займёт фронт, 9090 — `make run`, 8025 — Mailpit из docker-compose.yml.
+
+services:
+  caddy:
+    ports: !override
+      - "8081:80"
+      - "8443:443"
+
+  api:
+    ports: !override
+      - "127.0.0.1:9091:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:3030:3000"
+
+  postgres:
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_USER: vcard
+      POSTGRES_PASSWORD: vcard
+      POSTGRES_DB: vcard
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vcard -d vcard"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # С Docker Hub образы MinIO удалены; на quay.io остались, но новых
+  # не будет — версия закреплена.
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: vcard-local
+      MINIO_ROOT_PASSWORD: vcard-local-secret
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:8026:8025"

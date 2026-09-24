@@ -86,6 +86,35 @@ func (r *OutboxRepo) MarkSent(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// CountByStatus считает письма в очереди по статусам — для метрик.
+// Таблица маленькая, а PENDING покрыт частичным индексом, так что
+// запрос на каждый сбор метрик базе не заметен.
+func (r *OutboxRepo) CountByStatus(ctx context.Context) (map[string]int64, error) {
+	const q = `select status, count(*) from email_outbox group by status`
+
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("count outbox: %w", mapError(err))
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var (
+			status string
+			n      int64
+		)
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan outbox count: %w", err)
+		}
+		counts[status] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count outbox: %w", mapError(err))
+	}
+	return counts, nil
+}
+
 // MarkFailed откладывает следующую попытку или окончательно сдаётся.
 //
 // Бесконечно ретраить нельзя: несуществующий ящик будет отвергаться вечно,

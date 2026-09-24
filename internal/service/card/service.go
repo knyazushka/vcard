@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"time"
 
 	// Форматы, которые принимаются при загрузке. Импортируются ради
 	// побочного эффекта — регистрации декодеров.
@@ -73,6 +74,7 @@ func (s *Service) Render(ctx context.Context, p domain.Profile, format Format) (
 	// найденный файл заведомо актуален: устареть, оставшись под тем же
 	// именем, он не может.
 	if body, err := s.read(ctx, key); err == nil {
+		cacheHits.WithLabelValues(string(format)).Inc()
 		return Result{Body: body, Key: key, ETag: etag(hash, format)}, nil
 	}
 
@@ -81,6 +83,7 @@ func (s *Service) Render(ctx context.Context, p domain.Profile, format Format) (
 		return Result{}, err
 	}
 
+	start := time.Now()
 	var body []byte
 	switch format {
 	case FormatSVG:
@@ -91,6 +94,7 @@ func (s *Service) Render(ctx context.Context, p domain.Profile, format Format) (
 	if err != nil {
 		return Result{}, err
 	}
+	renderDuration.WithLabelValues(string(format)).Observe(time.Since(start).Seconds())
 
 	if err := s.files.Put(ctx, key, bytes.NewReader(body), contentType(format)); err != nil {
 		return Result{}, fmt.Errorf("store card: %w", err)

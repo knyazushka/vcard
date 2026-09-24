@@ -1,0 +1,17 @@
+# Дашборды лежат в репозитории и приезжают с каждой выкаткой.
+# Правка в интерфейсе не сохранится: изменения — через JSON в git
+# (в Grafana: Export → Save to file, и заменить файл).
+#
+# Изменённый файл Grafana 13 на лету не перечитывает (проверено, в том
+# числе с явным updateIntervalSeconds), поэтому deploy.sh перезапускает
+# её после каждой выкатки.
+apiVersion: 1
+
+providers:
+  - name: vcard
+    folder: vcard
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

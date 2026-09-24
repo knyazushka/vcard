@@ -1,0 +1,65 @@
+name: ci
+
+# Проверки на каждом PR и перед каждой выкаткой: release.yml вызывает
+# этот же файл, чтобы список проверок существовал в одном месте.
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - LICENSE
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make lint
+
+  test:
+    runs-on: ubuntu-latest
+    # Настоящий Postgres той же версии, что в docker-compose.yml: миграции
+    # прогоняются целиком — вверх, полный откат и снова вверх. Порт тот же
+    # 5433, поэтому make берёт строку подключения по умолчанию.
+    services:
+      postgres:
+        image: postgres:18.1-alpine
+        env:
+          POSTGRES_USER: vcard
+          POSTGRES_PASSWORD: vcard
+          POSTGRES_DB: vcard
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U vcard -d vcard"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: make migrate-verify
+
+  # Contract-first держится на этой проверке: код, разошедшийся со спекой,
+  # не проходит в main.
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - run: make api-check

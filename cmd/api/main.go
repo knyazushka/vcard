@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/knyazushka/vcard/internal/config"
@@ -32,6 +34,7 @@ import (
 	"github.com/knyazushka/vcard/internal/service/profile"
 	"github.com/knyazushka/vcard/internal/storage"
 	"github.com/knyazushka/vcard/internal/storage/localfs"
+	"github.com/knyazushka/vcard/internal/storage/s3"
 	"github.com/knyazushka/vcard/internal/worker"
 )
 
@@ -65,9 +68,15 @@ func run() error {
 
 	log.Info("connected to database")
 
+	outboxRepo := postgresrepo.NewOutboxRepo(pool)
+	prometheus.MustRegister(
+		postgres.NewPoolCollector(pool),
+		worker.NewQueueCollector(outboxRepo),
+	)
+
 	tokens := auth.NewTokenIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTTL, cfg.Auth.RefreshTTL)
 
-	files, err := localfs.New(cfg.Storage.LocalPath, cfg.Storage.BaseURL)
+	files, err := newBlobStore(ctx, cfg.Storage)
 	if err != nil {
 		return fmt.Errorf("init storage: %w", err)
 	}
@@ -102,7 +111,7 @@ func run() error {
 	}
 
 	outbox := worker.NewOutbox(
-		postgresrepo.NewOutboxRepo(pool),
+		outboxRepo,
 		email.NewSMTPSender(cfg.Mail.SMTPAddr, cfg.Mail.From, cfg.Mail.SMTPUser, cfg.Mail.SMTPPass),
 		renderer, log, cfg.Mail.OutboxPollInterval, cfg.Mail.OutboxBatchSize,
 	)
@@ -159,6 +168,30 @@ func run() error {
 	return nil
 }
 
+// newBlobStore выбирает хранилище по STORAGE_DRIVER. Остальной код видит
+// только BlobStore и о смене драйвера не узнаёт.
+func newBlobStore(ctx context.Context, cfg config.Storage) (storage.BlobStore, error) {
+	if cfg.Driver == "s3" {
+		store, err := s3.New(ctx, s3.Config{
+			Endpoint:  cfg.S3.Endpoint,
+			Region:    cfg.S3.Region,
+			Bucket:    cfg.S3.Bucket,
+			AccessKey: cfg.S3.AccessKey,
+			SecretKey: cfg.S3.SecretKey,
+		}, cfg.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+
+	store, err := localfs.New(cfg.LocalPath, cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
 func buildAPIHandler(
 	cfg *config.Config,
 	log *slog.Logger,
@@ -187,11 +220,56 @@ func buildAPIHandler(
 	// был доступен и логу, и обработчику паники.
 	return middleware.Chain(mux,
 		middleware.RequestID(cfg.HTTP.TrustProxyHeaders),
+		middleware.Operation(operationResolver(srv)),
+		// Снаружи Recover: пятисотка от паники тоже должна попасть
+		// в метрики.
+		middleware.Metrics(),
 		middleware.Recover(log),
 		middleware.AccessLog(log),
+		// Ниже логирования: preflight-запросы тоже должны попадать
+		// в журнал, иначе отказ браузера фронту не с чем сопоставить.
+		// Выше ограничителя: preflight не должен тратить лимит.
+		middleware.CORS(cfg.HTTP.CORSAllowedOrigins),
 		middleware.ClientInfo(cfg.HTTP.TrustProxyHeaders),
+		// Ниже ClientInfo: лимит считается по адресу, который она
+		// установила с учётом доверенного прокси.
+		middleware.RateLimit(middleware.RateLimitOptions{
+			PerMinute:       cfg.RateLimit.PerMinute,
+			StrictPerMinute: cfg.RateLimit.StrictPerMinute,
+			Strict:          strictOperations,
+		}),
 		// Ниже логирования: в журнал должен попадать реальный код ответа,
 		// в том числе 304.
 		middleware.ConditionalGet(),
 	), nil
+}
+
+// strictOperations живут по строгому лимиту, а не по общему. На входе
+// и приёме приглашения перебирают пароли и токены, а приглашения уходят
+// письмами с нашего домена: общего лимита хватило бы и на перебор,
+// и на то, чтобы попасть в спам-листы. Все они есть в спеке с ответом 429.
+var strictOperations = []string{
+	"login",
+	"register",
+	"getInvitationPreview",
+	"acceptInvitation",
+	"createInvitation",
+	"resendInvitation",
+}
+
+// operationResolver сопоставляет запрос с операцией из спеки тем же
+// роутером, которым его потом обслужит ogen.
+func operationResolver(srv *openapi.Server) func(*http.Request) string {
+	return func(r *http.Request) string {
+		switch {
+		case r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "":
+			return middleware.OperationPreflight
+		case strings.HasPrefix(r.URL.Path, "/files/"):
+			return middleware.OperationFiles
+		}
+		if route, ok := srv.FindPath(r.Method, r.URL); ok {
+			return route.OperationID()
+		}
+		return middleware.OperationUnknown
+	}
 }

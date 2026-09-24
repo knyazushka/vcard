@@ -37,18 +37,34 @@ func NewErrorHandler(log *slog.Logger) ogenerrors.ErrorHandler {
 			)
 		}
 
-		// Кодируется тем же сериализатором, что и ответы ogen. Через
-		// encoding/json форма получилась бы другой (например, nil-срез
-		// превращается в "fields":null), и клиент видел бы два разных
-		// представления одного и того же типа Error.
-		enc := jx.GetEncoder()
-		defer jx.PutEncoder(enc)
-		body.Encode(enc)
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(status)
-		_, _ = w.Write(enc.Bytes())
+		writeError(w, status, body)
 	}
+}
+
+// WriteError отвечает ошибкой в формате Error в обход сгенерированного
+// сервера — для обёрток вроде ограничителя частоты, которые отказывают
+// раньше, чем запрос дойдёт до ogen. Клиент должен получать одну и ту же
+// форму ошибки, какой бы слой ему ни отказал.
+func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	writeError(w, status, openapi.Error{
+		Code:      code,
+		Message:   message,
+		RequestId: openapi.NewOptString(RequestIDFromContext(r.Context())),
+	})
+}
+
+func writeError(w http.ResponseWriter, status int, body openapi.Error) {
+	// Кодируется тем же сериализатором, что и ответы ogen. Через
+	// encoding/json форма получилась бы другой (например, nil-срез
+	// превращается в "fields":null), и клиент видел бы два разных
+	// представления одного и того же типа Error.
+	enc := jx.GetEncoder()
+	defer jx.PutEncoder(enc)
+	body.Encode(enc)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(enc.Bytes())
 }
 
 func mapError(ctx context.Context, err error) (int, openapi.Error) {

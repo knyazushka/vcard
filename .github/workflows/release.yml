@@ -1,0 +1,186 @@
+name: release
+
+# Каждый push в main: проверки → образ в GHCR → выкатка на сервер.
+#
+# Откат — перезапуск job deploy в одном из прошлых запусков этого workflow
+# (Actions → release → нужный запуск → Re-run jobs → deploy). Job выкатывает
+# образ своего коммита, а образы в реестре не удаляются.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - LICENSE
+
+# Выкатки идут по очереди, и начатая не прерывается: оборванная посреди
+# миграций выкатка хуже, чем очередь из двух.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # Выкатывается всегда тег коммита: он не меняется, и по нему
+          # однозначно видно, какой код сейчас на сервере.
+          tags: |
+            type=sha,format=long
+            type=raw,value=main
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    # Секреты и переменные — в окружении production (Settings →
+    # Environments), а не на уровне репозитория: так их видит только
+    # этот job, и на окружение можно повесить ручное подтверждение.
+    environment:
+      name: production
+      url: https://${{ vars.API_DOMAIN }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+      DEPLOY_DIR: /opt/vcard
+    steps:
+      - uses: actions/checkout@v7
+
+      # Конфигурация приложения собирается здесь, а не хранится на сервере:
+      # источник истины один — окружение production в GitHub. Секреты
+      # передаются через env, а не подстановкой в текст скрипта, чтобы
+      # содержимое значения не могло стать командой.
+      - name: Собрать env-файлы
+        env:
+          # Секреты
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          STORAGE_S3_ACCESS_KEY: ${{ secrets.STORAGE_S3_ACCESS_KEY }}
+          STORAGE_S3_SECRET_KEY: ${{ secrets.STORAGE_S3_SECRET_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          # Обычные настройки: видны и правятся в интерфейсе как есть
+          PUBLIC_APP_URL: ${{ vars.PUBLIC_APP_URL }}
+          CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+          STORAGE_BASE_URL: ${{ vars.STORAGE_BASE_URL }}
+          STORAGE_S3_ENDPOINT: ${{ vars.STORAGE_S3_ENDPOINT }}
+          STORAGE_S3_REGION: ${{ vars.STORAGE_S3_REGION }}
+          STORAGE_S3_BUCKET: ${{ vars.STORAGE_S3_BUCKET }}
+          SMTP_ADDR: ${{ vars.SMTP_ADDR }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
+          RATE_LIMIT_PER_MINUTE: ${{ vars.RATE_LIMIT_PER_MINUTE }}
+          RATE_LIMIT_STRICT_PER_MINUTE: ${{ vars.RATE_LIMIT_STRICT_PER_MINUTE }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          required=(DATABASE_URL JWT_SECRET PUBLIC_APP_URL CORS_ALLOWED_ORIGINS
+                    STORAGE_BASE_URL STORAGE_S3_ENDPOINT STORAGE_S3_BUCKET
+                    STORAGE_S3_ACCESS_KEY STORAGE_S3_SECRET_KEY)
+          # Почта может быть ещё не подключена: сервис без неё работает,
+          # но письмо за шесть неудачных попыток (около минуты) уходит
+          # в FAILED. Приглашения до настройки SMTP не отправлять.
+          optional=(STORAGE_S3_REGION SMTP_ADDR SMTP_USER SMTP_PASSWORD MAIL_FROM
+                    RATE_LIMIT_PER_MINUTE RATE_LIMIT_STRICT_PER_MINUTE)
+
+          missing=()
+          for name in "${required[@]}" GRAFANA_ADMIN_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::В окружении production не заданы: ${missing[*]}"
+            exit 1
+          fi
+
+          for name in "${required[@]}" "${optional[@]}"; do
+            value=${!name}
+            # Пустое значение не пишем вовсе: пусть действует дефолт из
+            # internal/config, а не пустая строка.
+            [[ -n "$value" ]] || continue
+            if [[ "$value" == *$'\n'* ]]; then
+              echo "::error::$name содержит перевод строки"
+              exit 1
+            fi
+            printf '%s=%s\n' "$name" "$value"
+          done > app.env
+
+          # Grafana берёт пароль только при самом первом запуске, когда
+          # создаёт администратора. Смена секрета потом ничего не меняет —
+          # см. docs/operations.md.
+          if [[ "$GRAFANA_ADMIN_PASSWORD" == *$'\n'* ]]; then
+            echo "::error::GRAFANA_ADMIN_PASSWORD содержит перевод строки"
+            exit 1
+          fi
+          printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" > grafana.env
+
+      - name: Настроить SSH
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_KNOWN_HOSTS: ${{ vars.SSH_KNOWN_HOSTS }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Ключ сервера закреплён заранее, а не принимается при первом
+          # подключении: иначе подменённый хост получил бы все секреты.
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SSH_HOST
+            User $SSH_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            BatchMode yes
+          EOF
+
+      - name: Выкатить
+        env:
+          API_DOMAIN: ${{ vars.API_DOMAIN }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf 'IMAGE=%s\nAPI_DOMAIN=%s\n' "$IMAGE" "$API_DOMAIN" > .env
+          # Каталог deploy/ целиком, с подкаталогами конфигов, кроме
+          # локального стенда. Права самого каталога на сервере не трогаем —
+          # их выставляли при подготовке.
+          tar -C deploy --exclude=./local -cf - . | ssh server "tar -C '$DEPLOY_DIR' --no-overwrite-dir -xf -"
+          scp -q .env app.env grafana.env "server:$DEPLOY_DIR/"
+          # Токен уходит на stdin, а не в аргументы: аргументы видны
+          # в списке процессов сервера.
+          printf '%s' "$REGISTRY_TOKEN" | ssh server "sh $DEPLOY_DIR/deploy.sh '$REGISTRY_USER'"
