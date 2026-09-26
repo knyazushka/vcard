@@ -31,7 +31,9 @@ import (
 // раскладки разом обесценивает все ранее отрисованные картинки — без
 // ручной чистки хранилища и без «почему у половины сотрудников старый
 // дизайн».
-const Version = "1"
+//
+// 2 — отступы вокруг черты между именем и должностью в SVG.
+const Version = "2"
 
 // Размеры макета в логических единицах. PNG растрируется с двукратным
 // увеличением, поэтому единица здесь — это пиксель при обычной плотности.
@@ -267,12 +269,16 @@ func (r *Renderer) drawNameAndPosition(ctx *canvas.Context, card Card, y float64
 
 	if card.Position != "" {
 		sepFace := r.face(14, colorFaint, canvas.FontRegular)
-		sep := " | "
-		rest := available - nameWidth - sepFace.TextWidth(sep)
+		// Отступы вокруг черты — сдвигом, а не пробелами в самом тексте:
+		// браузер срезает пробелы по краям <text>, и в SVG черта липла
+		// к имени, хотя в PNG стояла на месте.
+		space := sepFace.TextWidth(" ")
+		sepWidth := space + sepFace.TextWidth("|") + space
+		rest := available - nameWidth - sepWidth
 
 		if rest > 30 {
-			ctx.DrawText(contentLeft+nameWidth, y, canvas.NewTextLine(sepFace, sep, canvas.Left))
-			ctx.DrawText(contentLeft+nameWidth+sepFace.TextWidth(sep), y,
+			ctx.DrawText(contentLeft+nameWidth+space, y, canvas.NewTextLine(sepFace, "|", canvas.Left))
+			ctx.DrawText(contentLeft+nameWidth+sepWidth, y,
 				canvas.NewTextLine(posFace, truncate(posFace, card.Position, rest), canvas.Left))
 		} else {
 			// Не поместилась рядом — переносим на свою строку, а не

@@ -171,11 +171,12 @@ jobs:
       - name: Выкатить
         env:
           API_DOMAIN: ${{ vars.API_DOMAIN }}
+          WEB_DOMAIN: ${{ vars.WEB_DOMAIN }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          printf 'IMAGE=%s\nAPI_DOMAIN=%s\n' "$IMAGE" "$API_DOMAIN" > .env
+          printf 'IMAGE=%s\nAPI_DOMAIN=%s\nWEB_DOMAIN=%s\n' "$IMAGE" "$API_DOMAIN" "$WEB_DOMAIN" > .env
           # Каталог deploy/ целиком, с подкаталогами конфигов, кроме
           # локального стенда. Права самого каталога на сервере не трогаем —
           # их выставляли при подготовке.

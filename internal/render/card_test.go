@@ -9,6 +9,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -190,6 +191,28 @@ func TestSVGIsSelfContained(t *testing.T) {
 	// Подмножество глифов: со всем шрифтом файл весит сотни килобайт.
 	if len(data) > 60*1024 {
 		t.Errorf("SVG весит %d КБ — похоже, шрифт вкомпилирован целиком", len(data)/1024)
+	}
+}
+
+// Браузер по правилам SVG срезает пробелы по краям <text>: отступ,
+// сделанный пробелом, есть в PNG и пропадает в SVG. Отступы в раскладке
+// обязаны быть сдвигом координаты, а не символом.
+//
+// Опасен только пробел в начале — он сдвигает видимый текст. Хвостовой
+// безвреден: следующий кусок стоит по своей абсолютной координате.
+func TestSVGTextHasNoLeadingSpaces(t *testing.T) {
+	r := testRenderer(t)
+
+	for name, card := range sampleCards() {
+		data, err := r.SVG(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range regexp.MustCompile(`<tspan[^>]*>([^<]*)</tspan>`).FindAllStringSubmatch(string(data), -1) {
+			if text := m[1]; strings.TrimLeft(text, " ") != text {
+				t.Errorf("%s: текст начинается с пробела: %q", name, text)
+			}
+		}
 	}
 }
 

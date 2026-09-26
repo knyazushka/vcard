@@ -7,7 +7,7 @@
 # заново.
 #
 # Файлы рядом кладёт CI при каждой выкатке, руками здесь ничего не правят:
-#   .env         — IMAGE и API_DOMAIN для подстановки в этот файл;
+#   .env         — IMAGE, API_DOMAIN и WEB_DOMAIN для подстановки в этот файл;
 #   app.env      — конфигурация приложения из GitHub Secrets и Variables;
 #   grafana.env  — пароль администратора Grafana.
 #
@@ -54,6 +54,9 @@ services:
       - "443:443/udp" # HTTP/3
     environment:
       API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is not set}
+      # Фронт — отдельный compose-проект (vcard-web), подключённый к сети
+      # этого, vcard_default; его домен обслуживает этот же Caddy.
+      WEB_DOMAIN: ${WEB_DOMAIN:?WEB_DOMAIN is not set}
     volumes:
       - ./caddy:/etc/caddy:ro
       # Без тома сертификаты выпускались бы заново на каждом перезапуске,

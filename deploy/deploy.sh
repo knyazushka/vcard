@@ -11,6 +11,14 @@ set -eu
 cd "$(dirname "$0")"
 chmod 600 app.env grafana.env
 
+# Фронт выкатывается на тот же сервер своим CI и под тем же пользователем,
+# и две выкатки разом мешали бы друг другу: общий вход в ghcr.io —
+# одна перелогинивается поверх другой, а `docker image prune` одной
+# сносит образ, который другая уже скачала, но ещё не запустила.
+# Тот же замок берёт deploy.sh фронта.
+exec 9>"$HOME/.vcard-deploy.lock"
+flock 9
+
 registry_user=$1
 docker login ghcr.io --username "$registry_user" --password-stdin >/dev/null
 trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT

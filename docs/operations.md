@@ -50,11 +50,17 @@
 ## Прод
 
 ```
- :443 ──▶ Caddy ──▶ api:8080 ─┬─▶ Postgres   управляемый, приватная сеть
-                              └─▶ S3         приватный бакет
+ :443 ──▶ Caddy ─┬─ vc-api ──────────────▶ api:8080 ─┬─▶ Postgres   управляемый, приватная сеть
+                 ├─ vc /api/v1/* ────────▶ api:8080  └─▶ S3         приватный бакет
+                 └─ vc  остальное ─▶ web:3000 ──▶ api:8080   серверный рендер
  127.0.0.1:9090 ──▶ api:9090      пробы и метрики, только с самого сервера
  127.0.0.1:3000 ──▶ Grafana ──▶ Prometheus ──▶ api:9090
 ```
+
+`web` — фронт из репозитория `vcard-app`: свой CI, свой compose-проект
+`vcard-web` в `/opt/vcard-web`, подключённый к сети этого, `vcard_default`.
+Его домен обслуживает этот же Caddy, поэтому бек выкатывается первым.
+Обе выкатки берут один замок на сервере и не идут одновременно.
 
 Одна VPS в Timeweb.Cloud с Docker Compose, рядом — управляемый Postgres
 и S3. Почему так, а не App Platform или Kubernetes, — в
@@ -83,7 +89,7 @@
 | Имя | Что | Записи |
 |---|---|---|
 | `vc-api.knyazushka.ru` | API | A → IP сервера. **До** первой выкатки, иначе Caddy не получит сертификат |
-| `vc.knyazushka.ru` | фронт | когда появится фронт |
+| `vc.knyazushka.ru` | фронт | A → IP сервера. Тоже до первой выкатки: без записи Caddy повторяет выпуск сертификата с растущей паузой — API это не задевает, но фронт не откроется |
 | `vcard.knyazushka.ru` | отправитель писем | SPF, DKIM, DMARC — см. «Почта» |
 
 ### Первая выкатка
@@ -94,10 +100,10 @@
    - VPS: Ubuntu 26.04 или Debian 13 (вкладка «Операционные системы», не
      «Docker Hub»), 1 vCPU и 2 ГБ. Меньше — тесно: argon2id берёт 64 МБ
      на каждую проверку пароля, api после нескольких входов держит около
-     200 МБ, у Prometheus и Grafana потолок по 512 МБ.
+     200 МБ, у Prometheus, Grafana и фронта потолок по 512 МБ.
    - Postgres — см. «База».
    - S3: **приватный** бакет и ключи к нему.
-2. **DNS**: A-запись `vc-api` на IP сервера.
+2. **DNS**: A-записи `vc-api` и `vc` на IP сервера.
 3. **Сервер** — см. «Подготовка сервера».
 4. **GitHub** → Settings → Environments → `production`: секреты
    и переменные из «Конфигурации».
@@ -122,6 +128,7 @@ curl -fsSL https://get.docker.com | sh
 adduser --disabled-password --gecos '' deploy
 usermod -aG docker deploy
 install -d -o deploy -g deploy -m 750 /opt/vcard
+install -d -o deploy -g deploy -m 750 /opt/vcard-web   # фронт
 
 install -d -o deploy -g deploy -m 700 /home/deploy/.ssh
 echo 'ssh-ed25519 AAAA… ci@vcard' > /home/deploy/.ssh/authorized_keys
@@ -201,6 +208,7 @@ firewall, вход по SSH только по ключу.
 | | Пример |
 |---|---|
 | `API_DOMAIN` | `vc-api.knyazushka.ru` |
+| `WEB_DOMAIN` | `vc.knyazushka.ru` — домен фронта, его обслуживает этот же Caddy |
 | `PUBLIC_APP_URL` | `https://vc.knyazushka.ru` |
 | `CORS_ALLOWED_ORIGINS` | `https://vc.knyazushka.ru` |
 | `STORAGE_BASE_URL` | `https://vc-api.knyazushka.ru/files` |
@@ -288,6 +296,7 @@ make stand-down     # остановить и удалить данные сте
 | | Адрес |
 |---|---|
 | API | `https://localhost:8443/api/v1` — сертификат самоподписанный, `curl -k` |
+| Фронт | `https://vc.localhost:8443` — поднимается из репозитория фронта, `sh deploy/local/up.sh` |
 | Grafana | `http://localhost:3030`, `admin` / `local-admin` |
 | Mailpit | `http://localhost:8026` |
 | Пробы и метрики | `http://127.0.0.1:9091` |
